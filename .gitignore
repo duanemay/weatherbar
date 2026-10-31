@@ -1,0 +1,6 @@
+build/
+*.bak-*
+.DS_Store
+*.zip
+.idea/
+old-versions/
