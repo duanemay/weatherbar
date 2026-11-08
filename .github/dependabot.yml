@@ -1,0 +1,18 @@
+# WeatherBar has no third-party code: main.swift uses only macOS system frameworks
+# (Cocoa, CoreLocation, ServiceManagement, CryptoKit), so there is no package manifest to watch.
+# The only external dependencies are the GitHub Actions in .github/workflows/, pinned to commit SHAs.
+# Dependabot updates those pins and their "# vX.Y.Z" comments.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+      time: "08:00"
+      timezone: America/Detroit
+    groups:
+      actions:
+        patterns: ["*"]          # one PR for all action bumps
+    commit-message:
+      prefix: "ci"

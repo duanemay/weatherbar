@@ -148,6 +148,11 @@ Apple Silicon macOS runner it:
 4. Renders the dropdown, Settings and About windows to PNGs.
 5. Zips the app, writes its SHA-256 checksum, and uploads both plus the renders as build artifacts.
 
+**Dependencies:** the app has no third-party libraries; it uses only macOS system frameworks. The
+only external dependencies are the workflow's GitHub Actions, pinned to commit SHAs. Dependabot
+(`.github/dependabot.yml`) checks them every Monday and opens one grouped pull request when any have a
+new release.
+
 Pushing a tag such as `v1.5` also publishes a GitHub Release with the zip and its `.sha256` file
 attached. The installed apps' updater reads exactly those two files. The
 release job fails if the tag doesn't match the version in `Info.plist`.
