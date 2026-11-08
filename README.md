@@ -24,6 +24,9 @@ two-column forecast panel.
   first, start at login.
 - **Open Weather App** opens Apple's Weather app. **Refresh** fetches immediately; otherwise it
   refreshes every 10 minutes and on wake from sleep.
+- **Updates itself** from this repo's GitHub Releases. It checks at launch and once a day, offers
+  to install a newer version, then downloads it, verifies it, swaps it in place and relaunches. The
+  menu also has **Check for Updates…**.
 - **About window** with version and build date.
 
 | Settings | About |
@@ -45,8 +48,31 @@ notarized, so the first launch needs right-click, then Open. Or clear the quaran
 xattr -dr com.apple.quarantine WeatherBar.app
 ```
 
-On first launch it offers to move itself to /Applications. Then turn on **Start WeatherBar at
-login** in Settings. The login item points at the app's current location, so move it first.
+On first launch it offers to move itself to /Applications. Let it: self-update needs a folder it can
+write to, and the login item points at wherever the app is. Then turn on **Start WeatherBar at
+login** in Settings.
+
+## Updates
+
+WeatherBar asks `api.github.com/repos/duanemay/weatherbar/releases/latest` for the newest release at
+launch and every 24 hours. When it finds a newer version it shows the release notes with **Install
+and Relaunch**, **Later** and **Skip This Version**. Turn on **Install updates without asking** in
+Settings to skip the prompt.
+
+Before anything is replaced, the download must pass four checks, and a failure leaves the installed
+app untouched:
+
+1. Its SHA-256 matches the `.sha256` file published with the release.
+2. Its bundle identifier is `com.mayhoo.weatherbar`.
+3. Its version matches the release tag.
+4. Its code signature verifies.
+
+The new copy is unpacked beside the old one. After WeatherBar quits, a short script swaps the two,
+restores the old copy if the swap fails, and relaunches. The checks need the repository to be public,
+because GitHub's release API returns 404 to unauthenticated requests for a private repo.
+
+Releases are ad-hoc signed, not signed with an Apple Developer ID. macOS ties some permissions to the
+signature, so it may ask for Location access again after an update.
 
 **From source:**
 
@@ -72,6 +98,8 @@ defaults write com.mayhoo.weatherbar refreshMinutes -int 10
 defaults write com.mayhoo.weatherbar fontSize     -float 9       # menu bar text size
 defaults write com.mayhoo.weatherbar bigTemp      -bool true     # add a large temp before the columns
 defaults write com.mayhoo.weatherbar skipMovePrompt -bool true   # never offer to move to /Applications
+defaults write com.mayhoo.weatherbar autoCheckUpdates -bool false   # no automatic update checks
+defaults write com.mayhoo.weatherbar autoInstallUpdates -bool true  # install updates without asking
 ```
 
 ## Development
@@ -97,10 +125,16 @@ $B --geocode "East Lansing"        # test the place search
 $B --render out.png [--light]      # draw the dropdown to a PNG
 $B --render-settings out.png       # draw the Settings window
 $B --render-about out.png          # draw the About window
+$B --check-update                  # ask GitHub Releases for a newer version
+$B --apply-update                  # download, verify and install a newer version in place
 ```
 
+**Testing the updater** without GitHub: serve a release JSON and zip locally and point the app at it
+with `defaults write com.mayhoo.weatherbar updateFeedURL -string http://127.0.0.1:8765/release.json`,
+then run `--apply-update`. Delete the key afterwards.
+
 **Versioning:** the version lives in `Info.plist` (`CFBundleShortVersionString`). Bump it there,
-commit, then tag `v<version>` to publish a release.
+commit, then tag `v<version>` to publish a release. Installed copies pick it up within a day.
 
 ## Continuous integration
 
@@ -112,9 +146,10 @@ Apple Silicon macOS runner it:
 3. Smoke-tests a live weather fetch and a place search. These don't fail the build if the weather
    service is unreachable.
 4. Renders the dropdown, Settings and About windows to PNGs.
-5. Uploads the zipped app and the renders as build artifacts.
+5. Zips the app, writes its SHA-256 checksum, and uploads both plus the renders as build artifacts.
 
-Pushing a tag such as `v1.4` also publishes a GitHub Release with the zipped app attached. The
+Pushing a tag such as `v1.5` also publishes a GitHub Release with the zip and its `.sha256` file
+attached. The installed apps' updater reads exactly those two files. The
 release job fails if the tag doesn't match the version in `Info.plist`.
 
 ## Data and credits
@@ -133,8 +168,9 @@ release job fails if the tag doesn't match the version in `Info.plist`.
 | 1.1 | Oct 26, 2026 | Stacked two-column menu bar text, hourly and daily forecast. |
 | 1.2 | Oct 26, 2026 | Card-style dropdown with Current and Today sections. |
 | 1.3 | Oct 26, 2026 | Settings and About windows, Mac location, start at login, app icon. |
-| 1.4 | Oct 26, 2026 | Celsius first, solid cards, move-to-Applications prompt. |
+| 1.4 | Oct 26, 2026 | Celsius first, solid cards. |
 | 1.4 | Oct 27, 2026 | Two-column dropdown. Build date without time. |
+| 1.5 | Nov 8, 2026 | Self-update from GitHub Releases. Move-to-Applications prompt, which 1.4 listed but did not include. |
 
 ## License
 

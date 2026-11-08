@@ -25,11 +25,22 @@
 // Test modes: WeatherBar --once            prints one fetch to stdout
 //             WeatherBar --render out.png  draws the dropdown to a PNG (layout check without a screen)
 //             WeatherBar --render-settings out.png / --render-about out.png
+//             WeatherBar --check-update     ask GitHub Releases for a newer version (no install)
+//             WeatherBar --apply-update     headless: download, verify and install a newer release in place
+//
+// Updates: checks https://api.github.com/repos/duanemay/weatherbar/releases/latest at launch and daily,
+// offers to install a newer release, verifies it (SHA-256, bundle id, version, signature), swaps it in
+// place and relaunches.
+//   defaults write com.mayhoo.weatherbar autoCheckUpdates   -bool false  # no automatic checks
+//   defaults write com.mayhoo.weatherbar autoInstallUpdates -bool true   # install without asking
+//   defaults write com.mayhoo.weatherbar updateFeedURL -string URL       # testing: alternate release JSON
+//   defaults write com.mayhoo.weatherbar skipMovePrompt -bool true       # never offer to move to /Applications
 //             WeatherBar --geocode "Novi, MI"
 
 import Cocoa
 import CoreLocation
 import ServiceManagement
+import CryptoKit
 
 let appVersion = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "dev"
 let buildDate = Bundle.main.infoDictionary?["WBBuildDate"] as? String ?? "unknown"
@@ -43,6 +54,12 @@ enum Config {
     static var lon: Double  { (d.object(forKey: "longitude") as? Double) ?? defaultLon }
     static var place: String { d.string(forKey: "place") ?? defaultPlace }
     static var celsiusFirst: Bool { d.bool(forKey: "celsiusFirst") }
+    static var autoCheckUpdates: Bool { d.object(forKey: "autoCheckUpdates") == nil ? true : d.bool(forKey: "autoCheckUpdates") }
+    static var autoInstallUpdates: Bool { d.bool(forKey: "autoInstallUpdates") }
+    static var skippedVersion: String? { d.string(forKey: "skippedVersion") }
+    static var updateFeedURL: String {
+        d.string(forKey: "updateFeedURL") ?? "https://api.github.com/repos/duanemay/weatherbar/releases/latest"
+    }
     static var useLocation: Bool { d.object(forKey: "useLocation") == nil ? true : d.bool(forKey: "useLocation") }
     static var refreshMinutes: Double { let m = d.double(forKey: "refreshMinutes"); return m > 0 ? m : 10 }
     static var fontSize: CGFloat { let f = d.double(forKey: "fontSize"); return f > 0 ? CGFloat(f) : 9 }
@@ -433,10 +450,181 @@ func populate(_ menu: NSMenu, place: Place, note: String?, weather last: Weather
     menu.addItem(withTitle: "Refresh", action: #selector(AppDelegate.refresh), keyEquivalent: "r").target = target
     menu.addItem(withTitle: "Open Weather App", action: #selector(AppDelegate.openWeather), keyEquivalent: "o").target = target
     menu.addItem(.separator())
+    if let d = target as? AppDelegate, let rel = d.availableUpdate {
+        let mi = NSMenuItem(title: "Update to WeatherBar \(rel.version)…", action: #selector(AppDelegate.installAvailableUpdate), keyEquivalent: "")
+        mi.target = target
+        mi.image = symbolImage("arrow.down.circle.fill", size: 13)
+        menu.addItem(mi)
+    }
+    menu.addItem(withTitle: "Check for Updates…", action: #selector(AppDelegate.checkForUpdatesManually), keyEquivalent: "").target = target
     menu.addItem(withTitle: "Settings…", action: #selector(AppDelegate.showSettings), keyEquivalent: ",").target = target
     menu.addItem(withTitle: "About WeatherBar", action: #selector(AppDelegate.showAbout), keyEquivalent: "").target = target
     menu.addItem(.separator())
     menu.addItem(withTitle: "Quit WeatherBar", action: #selector(AppDelegate.quit), keyEquivalent: "q").target = target
+}
+
+// MARK: - Self-update from GitHub Releases
+
+struct Release {
+    let version: String          // "1.5" (tag "v1.5" without the v)
+    let zipURL: URL
+    let sha256URL: URL?
+    let notes: String
+}
+
+enum UpdateError: LocalizedError {
+    case http(Int), noRelease, badRelease(String), checksum, verify(String), install(String)
+    var errorDescription: String? {
+        switch self {
+        case .http(404): return "no published release found (GitHub returned 404; the repo may still be private)"
+        case .http(let c): return "GitHub returned HTTP \(c)"
+        case .noRelease: return "no release information"
+        case .badRelease(let s): return "the release is missing \(s)"
+        case .checksum: return "the download's SHA-256 checksum did not match"
+        case .verify(let s): return "the downloaded app failed verification: \(s)"
+        case .install(let s): return s
+        }
+    }
+}
+
+/// true when `a` is a newer dotted version than `b` ("1.10" > "1.9").
+func isNewer(_ a: String, than b: String) -> Bool {
+    let x = a.split(separator: ".").map { Int($0) ?? 0 }, y = b.split(separator: ".").map { Int($0) ?? 0 }
+    for i in 0..<max(x.count, y.count) {
+        let p = i < x.count ? x[i] : 0, q = i < y.count ? y[i] : 0
+        if p != q { return p > q }
+    }
+    return false
+}
+
+func githubRequest(_ url: URL) -> URLRequest {
+    var r = URLRequest(url: url, cachePolicy: .reloadIgnoringLocalCacheData, timeoutInterval: 60)
+    r.setValue("WeatherBar/\(appVersion)", forHTTPHeaderField: "User-Agent")
+    r.setValue("application/vnd.github+json", forHTTPHeaderField: "Accept")
+    return r
+}
+
+func fetchLatestRelease(completion: @escaping (Result<Release, Error>) -> Void) {
+    guard let url = URL(string: Config.updateFeedURL) else { completion(.failure(UpdateError.noRelease)); return }
+    URLSession.shared.dataTask(with: githubRequest(url)) { data, resp, err in
+        if let err = err { completion(.failure(err)); return }
+        if let h = resp as? HTTPURLResponse, h.statusCode != 200 { completion(.failure(UpdateError.http(h.statusCode))); return }
+        guard let data = data, let j = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let tag = j["tag_name"] as? String else { completion(.failure(UpdateError.noRelease)); return }
+        let version = tag.hasPrefix("v") ? String(tag.dropFirst()) : tag
+        let assets = j["assets"] as? [[String: Any]] ?? []
+        func asset(_ name: String) -> URL? {
+            assets.first { ($0["name"] as? String) == name }
+                .flatMap { $0["browser_download_url"] as? String }.flatMap(URL.init(string:))
+        }
+        guard let zip = asset("WeatherBar-\(version).zip") else {
+            completion(.failure(UpdateError.badRelease("WeatherBar-\(version).zip"))); return
+        }
+        completion(.success(Release(version: version, zipURL: zip, sha256URL: asset("WeatherBar-\(version).zip.sha256"),
+                                    notes: (j["body"] as? String) ?? "")))
+    }.resume()
+}
+
+func download(_ url: URL, completion: @escaping (Result<URL, Error>) -> Void) {
+    URLSession.shared.downloadTask(with: githubRequest(url)) { tmp, resp, err in
+        if let err = err { completion(.failure(err)); return }
+        if let h = resp as? HTTPURLResponse, h.statusCode != 200 { completion(.failure(UpdateError.http(h.statusCode))); return }
+        guard let tmp = tmp else { completion(.failure(UpdateError.noRelease)); return }
+        // the system deletes `tmp` when this handler returns, so keep a copy we own
+        let keep = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString + "-" + url.lastPathComponent)
+        do { try FileManager.default.moveItem(at: tmp, to: keep); completion(.success(keep)) } catch { completion(.failure(error)) }
+    }.resume()
+}
+
+@discardableResult
+func runTool(_ tool: String, _ args: [String]) -> (Int32, String) {
+    let p = Process(); p.executableURL = URL(fileURLWithPath: tool); p.arguments = args
+    let pipe = Pipe(); p.standardOutput = pipe; p.standardError = pipe
+    do { try p.run() } catch { return (-1, error.localizedDescription) }
+    let out = String(data: pipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+    p.waitUntilExit()
+    return (p.terminationStatus, out.trimmingCharacters(in: .whitespacesAndNewlines))
+}
+
+/// Downloads, checks and unpacks `rel` beside the app it will replace. Returns the staged .app.
+func prepareUpdate(_ rel: Release, replacing appURL: URL, completion: @escaping (Result<URL, Error>) -> Void) {
+    let fm = FileManager.default
+    let folder = appURL.deletingLastPathComponent()
+    guard fm.isWritableFile(atPath: folder.path) else {
+        completion(.failure(UpdateError.install("WeatherBar can't replace itself in \(folder.path). Move it to /Applications first.")))
+        return
+    }
+    download(rel.zipURL) { r in
+        let zip: URL
+        switch r { case .success(let z): zip = z; case .failure(let e): completion(.failure(e)); return }
+        func unpack(expectedSHA: String?) {
+            // Clean up BEFORE calling completion: a caller may exit the process inside it.
+            var stage: URL?
+            func done(_ r: Result<URL, Error>) {
+                try? fm.removeItem(at: zip)
+                if case .failure = r, let dir = stage { try? fm.removeItem(at: dir) }   // drop a rejected download
+                completion(r)
+            }
+            do {
+                if let want = expectedSHA {
+                    let got = SHA256.hash(data: try Data(contentsOf: zip)).map { String(format: "%02x", $0) }.joined()
+                    guard got == want.lowercased() else { throw UpdateError.checksum }
+                }
+                // same volume as the app, so the final swap is a rename
+                let dir = try fm.url(for: .itemReplacementDirectory, in: .userDomainMask, appropriateFor: appURL, create: true)
+                stage = dir
+                let (code, out) = runTool("/usr/bin/ditto", ["-x", "-k", zip.path, dir.path])
+                guard code == 0 else { throw UpdateError.install("unzip failed: \(out)") }
+                let newApp = dir.appendingPathComponent("WeatherBar.app")
+                guard let info = NSDictionary(contentsOf: newApp.appendingPathComponent("Contents/Info.plist")) else {
+                    throw UpdateError.verify("no Info.plist")
+                }
+                guard info["CFBundleIdentifier"] as? String == (Bundle.main.bundleIdentifier ?? "com.mayhoo.weatherbar") else {
+                    throw UpdateError.verify("wrong bundle identifier")
+                }
+                guard info["CFBundleShortVersionString"] as? String == rel.version else { throw UpdateError.verify("version mismatch") }
+                let (vc, vout) = runTool("/usr/bin/codesign", ["--verify", "--strict", newApp.path])
+                guard vc == 0 else { throw UpdateError.verify("signature check: \(vout)") }
+                done(.success(newApp))
+            } catch {
+                done(.failure(error))
+            }
+        }
+        guard let shaURL = rel.sha256URL else { unpack(expectedSHA: nil); return }
+        URLSession.shared.dataTask(with: githubRequest(shaURL)) { d, _, _ in
+            // `shasum -a 256` output: "<64 hex>  <file name>"
+            let hex = d.flatMap { String(data: $0, encoding: .utf8) }?
+                .split(whereSeparator: { $0 == " " || $0 == "\n" }).first.map(String.init)
+            guard let hex = hex, hex.count == 64 else {
+                try? fm.removeItem(at: zip)
+                completion(.failure(UpdateError.badRelease("a valid .sha256 file"))); return
+            }
+            unpack(expectedSHA: hex)
+        }.resume()
+    }
+}
+
+/// Starts a small shell script that waits for this process to exit, swaps the bundles (putting the old one
+/// back if the swap fails) and relaunches. Paths go in as arguments, never pasted into the script text.
+func installAndRelaunch(staged newApp: URL, replacing appURL: URL, quit: () -> Void = { NSApp.terminate(nil) }) throws {
+    let script = """
+    pid="$1"; old="$2"; new="$3"
+    while kill -0 "$pid" 2>/dev/null; do sleep 0.2; done
+    rm -rf "$old.previous"
+    if mv "$old" "$old.previous" && mv "$new" "$old"; then
+      rm -rf "$old.previous"
+    elif [ -d "$old.previous" ] && [ ! -d "$old" ]; then
+      mv "$old.previous" "$old"
+    fi
+    rm -rf "$(dirname "$new")"
+    xattr -dr com.apple.quarantine "$old" 2>/dev/null
+    open "$old"
+    """
+    let p = Process()
+    p.executableURL = URL(fileURLWithPath: "/bin/sh")
+    p.arguments = ["-c", script, "weatherbar-update", String(ProcessInfo.processInfo.processIdentifier), appURL.path, newApp.path]
+    try p.run()
+    quit()
 }
 
 // MARK: - Settings + About windows
@@ -452,11 +640,13 @@ final class SettingsWindow: NSWindowController {
     let hoursField = NSTextField(), daysField = NSTextField()
     let loginBox = NSButton(checkboxWithTitle: "Start WeatherBar at login", target: nil, action: nil)
     let celsiusBox = NSButton(checkboxWithTitle: "Celsius first (°C / °F; menu bar Hi/Lo in °C)", target: nil, action: nil)
+    let checkUpdatesBox = NSButton(checkboxWithTitle: "Check for updates daily", target: nil, action: nil)
+    let autoInstallBox = NSButton(checkboxWithTitle: "Install updates without asking", target: nil, action: nil)
     let status = NSTextField(labelWithString: "")
     var found: [GeoResult] = []
 
     init() {
-        let win = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 460, height: 330), styleMask: [.titled, .closable], backing: .buffered, defer: false)
+        let win = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 460, height: 390), styleMask: [.titled, .closable], backing: .buffered, defer: false)
         win.title = "WeatherBar Settings"
         win.isReleasedWhenClosed = false
         super.init(window: win)
@@ -493,6 +683,8 @@ final class SettingsWindow: NSWindowController {
             [lbl("Dropdown"), countRow],
             [lbl("Units"), celsiusBox],
             [lbl("Login"), loginBox],
+            [lbl("Updates"), checkUpdatesBox],
+            [NSView(), autoInstallBox],
             [NSView(), status],
             [NSView(), btnRow],
         ])
@@ -524,6 +716,8 @@ final class SettingsWindow: NSWindowController {
         hoursField.stringValue = "\(Config.hours)"; daysField.stringValue = "\(Config.days)"
         loginBox.state = SMAppService.mainApp.status == .enabled ? .on : .off
         celsiusBox.state = Config.celsiusFirst ? .on : .off
+        checkUpdatesBox.state = Config.autoCheckUpdates ? .on : .off
+        autoInstallBox.state = Config.autoInstallUpdates ? .on : .off
         status.stringValue = text
         results.isHidden = true
     }
@@ -574,6 +768,8 @@ final class SettingsWindow: NSWindowController {
         if let h = Int(hoursField.stringValue), h > 0, h <= 48 { d.set(h, forKey: "hours") }
         if let n = Int(daysField.stringValue), n > 0, n <= 14 { d.set(n, forKey: "days") }
         d.set(celsiusBox.state == .on, forKey: "celsiusFirst")
+        d.set(checkUpdatesBox.state == .on, forKey: "autoCheckUpdates")
+        d.set(autoInstallBox.state == .on, forKey: "autoInstallUpdates")
         window?.close()
         onSave?()
     }
@@ -680,6 +876,43 @@ for (flag, make) in [("--render-settings", { () -> NSWindow? in let s = Settings
     }
 }
 
+if CommandLine.arguments.contains("--apply-update") {
+    // Headless test of the real update path: fetch, download, verify, stage, swap after this process exits.
+    let sem = DispatchSemaphore(value: 0)
+    fetchLatestRelease { r in
+        guard case .success(let rel) = r else { if case .failure(let e) = r { print("ERROR: \(e.localizedDescription)") }; exit(1) }
+        guard isNewer(rel.version, than: appVersion) else { print("already at \(appVersion); latest is \(rel.version)"); exit(0) }
+        print("updating \(appVersion) -> \(rel.version)")
+        prepareUpdate(rel, replacing: Bundle.main.bundleURL) { r in
+            switch r {
+            case .success(let staged):
+                print("verified and staged: \(staged.path)")
+                do { try installAndRelaunch(staged: staged, replacing: Bundle.main.bundleURL, quit: { exit(0) }) }
+                catch { print("ERROR: \(error.localizedDescription)"); exit(1) }
+            case .failure(let e): print("ERROR: \(e.localizedDescription)"); exit(1)
+            }
+            sem.signal()
+        }
+    }
+    sem.wait(); exit(0)
+}
+
+if CommandLine.arguments.contains("--check-update") {
+    let sem = DispatchSemaphore(value: 0)
+    print("installed: \(appVersion)   feed: \(Config.updateFeedURL)")
+    fetchLatestRelease { r in
+        switch r {
+        case .success(let rel):
+            print("latest:    \(rel.version)   newer than installed: \(isNewer(rel.version, than: appVersion))")
+            print("zip:       \(rel.zipURL)")
+            print("sha256:    \(rel.sha256URL?.absoluteString ?? "none")")
+        case .failure(let e): print("ERROR: \(e.localizedDescription)")
+        }
+        sem.signal()
+    }
+    sem.wait(); exit(0)
+}
+
 // MARK: - App
 
 final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
@@ -693,6 +926,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     let locator = LocationResolver()
     lazy var settings = SettingsWindow()
     lazy var about = AboutWindow()
+    var availableUpdate: Release?
+    var updateTimer: Timer?
+    var installing = false
 
     func applicationDidFinishLaunching(_ note: Notification) {
         menu.delegate = self
@@ -714,6 +950,110 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         timer = Timer.scheduledTimer(withTimeInterval: Config.refreshMinutes * 60, repeats: true) { [weak self] _ in self?.refresh() }
         NSWorkspace.shared.notificationCenter.addObserver(self, selector: #selector(refresh),
                                                           name: NSWorkspace.didWakeNotification, object: nil)
+        offerMoveToApplications()
+        // first update check shortly after launch, then once a day
+        DispatchQueue.main.asyncAfter(deadline: .now() + 15) { [weak self] in self?.checkForUpdates(userInitiated: false) }
+        updateTimer = Timer.scheduledTimer(withTimeInterval: 24 * 3600, repeats: true) { [weak self] _ in
+            self?.checkForUpdates(userInitiated: false)
+        }
+    }
+
+    // MARK: Move to Applications
+
+    /// Offers to move the app into /Applications when it runs from anywhere else. Self-update and the
+    /// login item both want a stable, writable home.
+    func offerMoveToApplications() {
+        let src = Bundle.main.bundleURL
+        guard !src.path.hasPrefix("/Applications/"), !UserDefaults.standard.bool(forKey: "skipMovePrompt") else { return }
+        let dest = URL(fileURLWithPath: "/Applications/WeatherBar.app")
+        let alert = NSAlert()
+        alert.messageText = "Move WeatherBar to the Applications folder?"
+        alert.informativeText = "It is running from \(src.deletingLastPathComponent().path). In /Applications it can update itself and start at login reliably."
+        alert.addButton(withTitle: "Move to Applications")
+        alert.addButton(withTitle: "Not Now")
+        alert.showsSuppressionButton = true
+        alert.suppressionButton?.title = "Don't ask again"
+        NSApp.activate(ignoringOtherApps: true)
+        let answer = alert.runModal()
+        if alert.suppressionButton?.state == .on { UserDefaults.standard.set(true, forKey: "skipMovePrompt") }
+        guard answer == .alertFirstButtonReturn else { return }
+        let fm = FileManager.default
+        do {
+            if fm.fileExists(atPath: dest.path) { try fm.removeItem(at: dest) }
+            do { try fm.moveItem(at: src, to: dest) } catch { try fm.copyItem(at: src, to: dest) }
+            NSWorkspace.shared.openApplication(at: dest, configuration: NSWorkspace.OpenConfiguration()) { _, _ in
+                DispatchQueue.main.async { NSApp.terminate(nil) }
+            }
+        } catch {
+            inform("Couldn't move WeatherBar", error.localizedDescription)
+        }
+    }
+
+    // MARK: Updates
+
+    @objc func checkForUpdatesManually() { checkForUpdates(userInitiated: true) }
+
+    func checkForUpdates(userInitiated: Bool) {
+        guard userInitiated || Config.autoCheckUpdates, !installing else { return }
+        fetchLatestRelease { [weak self] r in DispatchQueue.main.async {
+            guard let self = self else { return }
+            switch r {
+            case .success(let rel) where isNewer(rel.version, than: appVersion):
+                self.availableUpdate = rel
+                if userInitiated { self.offerUpdate(rel); return }
+                if Config.skippedVersion == rel.version { return }
+                if Config.autoInstallUpdates { self.install(rel) } else { self.offerUpdate(rel) }
+            case .success:
+                self.availableUpdate = nil
+                if userInitiated { self.inform("WeatherBar is up to date", "Version \(appVersion) is the latest release.") }
+            case .failure(let e):
+                if userInitiated { self.inform("Couldn't check for updates", e.localizedDescription) }
+            }
+        } }
+    }
+
+    func offerUpdate(_ rel: Release) {
+        let a = NSAlert()
+        a.messageText = "WeatherBar \(rel.version) is available"
+        let notes = rel.notes.trimmingCharacters(in: .whitespacesAndNewlines)
+        a.informativeText = "You have \(appVersion)." + (notes.isEmpty ? "" : "\n\n" + String(notes.prefix(600)))
+        a.addButton(withTitle: "Install and Relaunch")
+        a.addButton(withTitle: "Later")
+        a.addButton(withTitle: "Skip This Version")
+        NSApp.activate(ignoringOtherApps: true)
+        switch a.runModal() {
+        case .alertFirstButtonReturn: install(rel)
+        case .alertThirdButtonReturn: UserDefaults.standard.set(rel.version, forKey: "skippedVersion")
+        default: break
+        }
+    }
+
+    @objc func installAvailableUpdate() { if let rel = availableUpdate { install(rel) } }
+
+    func install(_ rel: Release) {
+        guard !installing else { return }
+        installing = true
+        let appURL = Bundle.main.bundleURL
+        setBar(icon: "arrow.down.circle", big: "", col1: ("Updating", "…"), col2: ("", ""))
+        prepareUpdate(rel, replacing: appURL) { [weak self] r in DispatchQueue.main.async {
+            guard let self = self else { return }
+            switch r {
+            case .success(let staged):
+                do { try installAndRelaunch(staged: staged, replacing: appURL) } catch {
+                    self.installing = false; self.refresh()
+                    self.inform("Update failed", error.localizedDescription)
+                }
+            case .failure(let e):
+                self.installing = false; self.refresh()
+                self.inform("Update to \(rel.version) failed",
+                            e.localizedDescription + "\n\nYou can download it from the Releases page on GitHub instead.")
+            }
+        } }
+    }
+
+    func inform(_ title: String, _ text: String) {
+        let a = NSAlert(); a.messageText = title; a.informativeText = text
+        NSApp.activate(ignoringOtherApps: true); a.runModal()
     }
 
     /// Menu bar layout:  [icon] 49°F  H 66°     (optionally a large current temp before the columns)
