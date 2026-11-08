@@ -74,12 +74,18 @@ jobs:
           "$B" --render-about renders/about.png
 
       - name: Package
-        run: ditto -c -k --keepParent build/WeatherBar.app "WeatherBar-${{ steps.meta.outputs.version }}.zip"
+        run: |
+          z="WeatherBar-${{ steps.meta.outputs.version }}.zip"
+          ditto -c -k --keepParent build/WeatherBar.app "$z"
+          shasum -a 256 "$z" > "$z.sha256"   # the app's self-updater verifies downloads against this
+          cat "$z.sha256"
 
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: WeatherBar-${{ steps.meta.outputs.version }}
-          path: WeatherBar-${{ steps.meta.outputs.version }}.zip
+          path: |
+            WeatherBar-${{ steps.meta.outputs.version }}.zip
+            WeatherBar-${{ steps.meta.outputs.version }}.zip.sha256
           if-no-files-found: error
 
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
@@ -111,5 +117,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release create "$GITHUB_REF_NAME" "WeatherBar-${{ needs.build.outputs.version }}.zip" \
+          z="WeatherBar-${{ needs.build.outputs.version }}.zip"
+          sha256sum -c "$z.sha256"
+          gh release create "$GITHUB_REF_NAME" "$z" "$z.sha256" \
             --repo "$GITHUB_REPOSITORY" --title "WeatherBar $GITHUB_REF_NAME" --generate-notes
