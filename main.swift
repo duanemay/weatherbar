@@ -28,7 +28,8 @@
 //             WeatherBar --check-update     ask GitHub Releases for a newer version (no install)
 //             WeatherBar --apply-update     headless: download, verify and install a newer release in place
 //
-// Updates: checks https://api.github.com/repos/duanemay/weatherbar/releases/latest at launch and daily,
+// Updates: checks https://api.github.com/repos/duanemay/weatherbar/releases/latest at launch, every 12 hours,
+// and on wake from sleep when the last check is over an hour old (so a morning wake finds a night release);
 // offers to install a newer release, verifies it (SHA-256, bundle id, version, signature), swaps it in
 // place and relaunches.
 //   defaults write com.mayhoo.weatherbar autoCheckUpdates   -bool false  # no automatic checks
@@ -57,6 +58,11 @@ enum Config {
     static var autoCheckUpdates: Bool { d.object(forKey: "autoCheckUpdates") == nil ? true : d.bool(forKey: "autoCheckUpdates") }
     static var autoInstallUpdates: Bool { d.bool(forKey: "autoInstallUpdates") }
     static var skippedVersion: String? { d.string(forKey: "skippedVersion") }
+    static var updateCheckHours: Double { let h = d.double(forKey: "updateCheckHours"); return h > 0 ? h : 12 }
+    static var lastUpdateCheck: Date? {
+        get { d.object(forKey: "lastUpdateCheck") as? Date }
+        set { d.set(newValue, forKey: "lastUpdateCheck") }
+    }
     static var updateFeedURL: String {
         d.string(forKey: "updateFeedURL") ?? "https://api.github.com/repos/duanemay/weatherbar/releases/latest"
     }
@@ -667,7 +673,7 @@ final class SettingsWindow: NSWindowController {
     let hoursField = NSTextField(), daysField = NSTextField()
     let loginBox = NSButton(checkboxWithTitle: "Start WeatherBar at login", target: nil, action: nil)
     let celsiusBox = NSButton(checkboxWithTitle: "Celsius first (°C / °F; menu bar Hi/Lo in °C)", target: nil, action: nil)
-    let checkUpdatesBox = NSButton(checkboxWithTitle: "Check for updates daily", target: nil, action: nil)
+    let checkUpdatesBox = NSButton(checkboxWithTitle: "Check for updates twice a day and on wake", target: nil, action: nil)
     let autoInstallBox = NSButton(checkboxWithTitle: "Install updates without asking", target: nil, action: nil)
     let status = NSTextField(labelWithString: "")
     var found: [GeoResult] = []
@@ -955,6 +961,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     lazy var about = AboutWindow()
     var availableUpdate: Release?
     var updateTimer: Timer?
+    var laterUntil: [String: Date] = [:]   // version -> don't re-prompt before this time (after "Later")
     var installing = false
 
     func applicationDidFinishLaunching(_ note: Notification) {
@@ -978,11 +985,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         NSWorkspace.shared.notificationCenter.addObserver(self, selector: #selector(refresh),
                                                           name: NSWorkspace.didWakeNotification, object: nil)
         offerMoveToApplications()
-        // first update check shortly after launch, then once a day
+        // Update checks: shortly after launch; then whenever the last check is updateCheckHours old (12 by
+        // default), tested every 15 minutes so the schedule survives sleep; and after waking, if the last
+        // check is over an hour old, so a release published at night is found the next morning.
         DispatchQueue.main.asyncAfter(deadline: .now() + 15) { [weak self] in self?.checkForUpdates(userInitiated: false) }
-        updateTimer = Timer.scheduledTimer(withTimeInterval: 24 * 3600, repeats: true) { [weak self] _ in
-            self?.checkForUpdates(userInitiated: false)
+        updateTimer = Timer.scheduledTimer(withTimeInterval: 15 * 60, repeats: true) { [weak self] _ in
+            self?.checkForUpdatesIfDue(olderThan: Config.updateCheckHours * 3600)
         }
+        NSWorkspace.shared.notificationCenter.addObserver(self, selector: #selector(didWakeCheckUpdates),
+                                                          name: NSWorkspace.didWakeNotification, object: nil)
+    }
+
+    @objc func didWakeCheckUpdates() {
+        // give Wi-Fi a moment to reconnect after wake
+        DispatchQueue.main.asyncAfter(deadline: .now() + 30) { [weak self] in self?.checkForUpdatesIfDue(olderThan: 3600) }
+    }
+
+    func checkForUpdatesIfDue(olderThan seconds: TimeInterval) {
+        if let last = Config.lastUpdateCheck, Date().timeIntervalSince(last) < seconds { return }
+        checkForUpdates(userInitiated: false)
     }
 
     // MARK: Move to Applications
@@ -1022,6 +1043,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     func checkForUpdates(userInitiated: Bool) {
         guard userInitiated || Config.autoCheckUpdates, !installing else { return }
+        Config.lastUpdateCheck = Date()
         fetchLatestRelease { [weak self] r in DispatchQueue.main.async {
             guard let self = self else { return }
             switch r {
@@ -1029,6 +1051,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 self.availableUpdate = rel
                 if userInitiated { self.offerUpdate(rel); return }
                 if Config.skippedVersion == rel.version { return }
+                if let until = self.laterUntil[rel.version], Date() < until { return }   // "Later" was clicked recently
                 if Config.autoInstallUpdates { self.install(rel) } else { self.offerUpdate(rel) }
             case .success:
                 self.availableUpdate = nil
@@ -1051,7 +1074,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         switch a.runModal() {
         case .alertFirstButtonReturn: install(rel)
         case .alertThirdButtonReturn: UserDefaults.standard.set(rel.version, forKey: "skippedVersion")
-        default: break
+        default: laterUntil[rel.version] = Date().addingTimeInterval(Config.updateCheckHours * 3600)
         }
     }
 

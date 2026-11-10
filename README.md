@@ -24,7 +24,8 @@ two-column forecast panel.
   first, start at login.
 - **Open Weather App** opens Apple's Weather app. **Refresh** fetches immediately; otherwise it
   refreshes every 10 minutes and on wake from sleep.
-- **Updates itself** from this repo's GitHub Releases. It checks at launch and once a day, offers
+- **Updates itself** from this repo's GitHub Releases. It checks at launch, every 12 hours, and when
+  the Mac wakes, so a release published at night shows up the next morning. It offers
   to install a newer version, then downloads it, verifies it, swaps it in place and relaunches. The
   menu also has **Check for Updates…**.
 - **About window** with version and build date.
@@ -55,7 +56,7 @@ login** in Settings.
 ## Updates
 
 WeatherBar asks `api.github.com/repos/duanemay/weatherbar/releases/latest` for the newest release at
-launch and every 24 hours. When it finds a newer version it shows the release notes with **Install
+launch, every 12 hours, and on wake from sleep when the last check is over an hour old. When it finds a newer version it shows the release notes with **Install
 and Relaunch**, **Later** and **Skip This Version**. Turn on **Install updates without asking** in
 Settings to skip the prompt.
 
@@ -99,6 +100,7 @@ defaults write com.mayhoo.weatherbar fontSize     -float 9       # menu bar text
 defaults write com.mayhoo.weatherbar bigTemp      -bool true     # add a large temp before the columns
 defaults write com.mayhoo.weatherbar skipMovePrompt -bool true   # never offer to move to /Applications
 defaults write com.mayhoo.weatherbar autoCheckUpdates -bool false   # no automatic update checks
+defaults write com.mayhoo.weatherbar updateCheckHours -float 12     # hours between scheduled checks
 defaults write com.mayhoo.weatherbar autoInstallUpdates -bool true  # install updates without asking
 ```
 
@@ -134,7 +136,7 @@ with `defaults write com.mayhoo.weatherbar updateFeedURL -string http://127.0.0.
 then run `--apply-update`. Delete the key afterwards.
 
 **Versioning:** the version lives in `Info.plist` (`CFBundleShortVersionString`). Bump it there,
-commit, then tag `v<version>` to publish a release. Installed copies pick it up within a day.
+commit, then tag `v<version>` to publish a release. Installed copies pick it up within 12 hours, or at the next wake.
 
 ## Continuous integration
 
