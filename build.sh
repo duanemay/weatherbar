@@ -19,5 +19,11 @@ if [ -f icon.png ]; then
 fi
 # Stamp the build date (local time) into the bundle; About shows it.
 /usr/libexec/PlistBuddy -c "Add :WBBuildDate string '$(date '+%Y-%m-%d')'" "$APP/Contents/Info.plist"
-codesign --force --sign - "$APP"
+# Release builds (CI) sign with the WeatherBar certificate so macOS keeps permissions such as Location
+# across updates; set SIGN_IDENTITY (and SIGN_KEYCHAIN) to use it. Otherwise ad-hoc, fine for local builds.
+if [ -n "${SIGN_IDENTITY:-}" ]; then
+  codesign --force --timestamp=none ${SIGN_KEYCHAIN:+--keychain "$SIGN_KEYCHAIN"} --sign "$SIGN_IDENTITY" "$APP"
+else
+  codesign --force --sign - "$APP"
+fi
 echo "built $APP"

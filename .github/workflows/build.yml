@@ -43,6 +43,28 @@ jobs:
           echo "version=$v" >> "$GITHUB_OUTPUT"
           echo "WeatherBar version $v"
 
+      - name: Import signing certificate
+        # The self-signed "WeatherBar Code Signing" certificate, stored as Actions secrets. Signing every release
+        # with it gives each version the same identity, so macOS keeps permissions (Location) across updates.
+        # Not available to pull requests from forks; those builds stay ad-hoc.
+        env:
+          P12: ${{ secrets.SIGNING_CERT_P12 }}
+          P12_PASSWORD: ${{ secrets.SIGNING_CERT_PASSWORD }}
+        run: |
+          if [ -z "$P12" ]; then echo "No signing certificate; building ad-hoc."; exit 0; fi
+          KC="$RUNNER_TEMP/signing.keychain-db"; KP=$(openssl rand -hex 24)
+          echo "$P12" | base64 --decode > "$RUNNER_TEMP/signing.p12"
+          security create-keychain -p "$KP" "$KC"
+          security set-keychain-settings -lut 1800 "$KC"
+          security unlock-keychain -p "$KP" "$KC"
+          security import "$RUNNER_TEMP/signing.p12" -k "$KC" -P "$P12_PASSWORD" -T /usr/bin/codesign >/dev/null
+          security set-key-partition-list -S apple-tool:,apple: -s -k "$KP" "$KC" >/dev/null
+          rm -f "$RUNNER_TEMP/signing.p12"
+          id=$(security find-identity -p codesigning "$KC" | awk '/WeatherBar Code Signing/ {print $2; exit}')
+          test -n "$id"
+          echo "SIGN_IDENTITY=$id" >> "$GITHUB_ENV"
+          echo "SIGN_KEYCHAIN=$KC" >> "$GITHUB_ENV"
+
       - name: Build
         run: ./build.sh
 
@@ -53,6 +75,11 @@ jobs:
           test -f "$APP/Contents/Resources/AppIcon.icns"
           lipo -archs "$APP/Contents/MacOS/WeatherBar" | grep -qw arm64
           codesign --verify --strict --verbose=2 "$APP"
+          codesign -d -r- "$APP" 2>&1 | grep designated
+          # releases must carry the WeatherBar certificate; the app's updater rejects anything else
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+            codesign --verify -R='identifier "com.mayhoo.weatherbar" and certificate root = H"305d14cb4aa12b2559947d3f4cd41d4510371334"' "$APP"
+          fi
           /usr/libexec/PlistBuddy -c "Print :WBBuildDate" "$APP/Contents/Info.plist"
 
       - name: Smoke test (live weather fetch)
@@ -87,6 +114,10 @@ jobs:
             WeatherBar-${{ steps.meta.outputs.version }}.zip
             WeatherBar-${{ steps.meta.outputs.version }}.zip.sha256
           if-no-files-found: error
+
+      - name: Remove signing keychain
+        if: always()
+        run: security delete-keychain "$RUNNER_TEMP/signing.keychain-db" 2>/dev/null || true
 
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
