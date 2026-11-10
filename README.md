@@ -57,8 +57,9 @@ login** in Settings.
 
 WeatherBar asks `api.github.com/repos/duanemay/weatherbar/releases/latest` for the newest release at
 launch, every 12 hours, and on wake from sleep when the last check is over an hour old. When it finds a newer version it shows the release notes with **Install
-and Relaunch**, **Later** and **Skip This Version**. Turn on **Install updates without asking** in
-Settings to skip the prompt.
+and Relaunch**, **Later** and **Skip This Version**. Settings has one **Updates** menu: **Ask before installing** (the default),
+**Install automatically**, or **Don't check automatically**. Check for Updates… in the menu works with
+any of them.
 
 Before anything is replaced, the download must pass four checks, and a failure leaves the installed
 app untouched:
@@ -99,9 +100,8 @@ defaults write com.mayhoo.weatherbar refreshMinutes -int 10
 defaults write com.mayhoo.weatherbar fontSize     -float 9       # menu bar text size
 defaults write com.mayhoo.weatherbar bigTemp      -bool true     # add a large temp before the columns
 defaults write com.mayhoo.weatherbar skipMovePrompt -bool true   # never offer to move to /Applications
-defaults write com.mayhoo.weatherbar autoCheckUpdates -bool false   # no automatic update checks
+defaults write com.mayhoo.weatherbar updateMode -string ask         # ask (default), auto, or off
 defaults write com.mayhoo.weatherbar updateCheckHours -float 12     # hours between scheduled checks
-defaults write com.mayhoo.weatherbar autoInstallUpdates -bool true  # install updates without asking
 ```
 
 ## Development

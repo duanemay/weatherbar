@@ -32,8 +32,7 @@
 // and on wake from sleep when the last check is over an hour old (so a morning wake finds a night release);
 // offers to install a newer release, verifies it (SHA-256, bundle id, version, signature), swaps it in
 // place and relaunches.
-//   defaults write com.mayhoo.weatherbar autoCheckUpdates   -bool false  # no automatic checks
-//   defaults write com.mayhoo.weatherbar autoInstallUpdates -bool true   # install without asking
+//   defaults write com.mayhoo.weatherbar updateMode -string ask          # ask (default) | auto | off
 //   defaults write com.mayhoo.weatherbar updateFeedURL -string URL       # testing: alternate release JSON
 //   defaults write com.mayhoo.weatherbar skipMovePrompt -bool true       # never offer to move to /Applications
 //             WeatherBar --geocode "Novi, MI"
@@ -55,8 +54,14 @@ enum Config {
     static var lon: Double  { (d.object(forKey: "longitude") as? Double) ?? defaultLon }
     static var place: String { d.string(forKey: "place") ?? defaultPlace }
     static var celsiusFirst: Bool { d.bool(forKey: "celsiusFirst") }
-    static var autoCheckUpdates: Bool { d.object(forKey: "autoCheckUpdates") == nil ? true : d.bool(forKey: "autoCheckUpdates") }
-    static var autoInstallUpdates: Bool { d.bool(forKey: "autoInstallUpdates") }
+    /// "auto": install new versions without asking. "ask": prompt (default). "off": no automatic checks;
+    /// Check for Updates… in the menu still works. Before 1.9 this was two checkboxes, autoCheckUpdates and
+    /// autoInstallUpdates; their values are honoured until updateMode is saved once.
+    static var updateMode: UpdateMode {
+        if let m = d.string(forKey: "updateMode").flatMap(UpdateMode.init(rawValue:)) { return m }
+        if d.object(forKey: "autoCheckUpdates") != nil && !d.bool(forKey: "autoCheckUpdates") { return .off }
+        return d.bool(forKey: "autoInstallUpdates") ? .auto : .ask
+    }
     static var skippedVersion: String? { d.string(forKey: "skippedVersion") }
     static var updateCheckHours: Double { let h = d.double(forKey: "updateCheckHours"); return h > 0 ? h : 12 }
     static var lastUpdateCheck: Date? {
@@ -482,6 +487,17 @@ func populate(_ menu: NSMenu, place: Place, note: String?, weather last: Weather
 
 // MARK: - Self-update from GitHub Releases
 
+enum UpdateMode: String, CaseIterable {
+    case auto, ask, off
+    var title: String {
+        switch self {
+        case .auto: return "Install automatically"
+        case .ask: return "Ask before installing"
+        case .off: return "Don't check automatically"
+        }
+    }
+}
+
 struct Release {
     let version: String          // "1.5" (tag "v1.5" without the v)
     let zipURL: URL
@@ -673,13 +689,12 @@ final class SettingsWindow: NSWindowController {
     let hoursField = NSTextField(), daysField = NSTextField()
     let loginBox = NSButton(checkboxWithTitle: "Start WeatherBar at login", target: nil, action: nil)
     let celsiusBox = NSButton(checkboxWithTitle: "Celsius first (°C / °F; menu bar Hi/Lo in °C)", target: nil, action: nil)
-    let checkUpdatesBox = NSButton(checkboxWithTitle: "Check for updates twice a day and on wake", target: nil, action: nil)
-    let autoInstallBox = NSButton(checkboxWithTitle: "Install updates without asking", target: nil, action: nil)
+    let updateModePopup = NSPopUpButton()
     let status = NSTextField(labelWithString: "")
     var found: [GeoResult] = []
 
     init() {
-        let win = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 460, height: 390), styleMask: [.titled, .closable], backing: .buffered, defer: false)
+        let win = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 460, height: 365), styleMask: [.titled, .closable], backing: .buffered, defer: false)
         win.title = "WeatherBar Settings"
         win.isReleasedWhenClosed = false
         super.init(window: win)
@@ -716,8 +731,7 @@ final class SettingsWindow: NSWindowController {
             [lbl("Dropdown"), countRow],
             [lbl("Units"), celsiusBox],
             [lbl("Login"), loginBox],
-            [lbl("Updates"), checkUpdatesBox],
-            [NSView(), autoInstallBox],
+            [lbl("Updates"), updateModePopup],
             [NSView(), status],
             [NSView(), btnRow],
         ])
@@ -749,8 +763,10 @@ final class SettingsWindow: NSWindowController {
         hoursField.stringValue = "\(Config.hours)"; daysField.stringValue = "\(Config.days)"
         loginBox.state = SMAppService.mainApp.status == .enabled ? .on : .off
         celsiusBox.state = Config.celsiusFirst ? .on : .off
-        checkUpdatesBox.state = Config.autoCheckUpdates ? .on : .off
-        autoInstallBox.state = Config.autoInstallUpdates ? .on : .off
+        updateModePopup.removeAllItems()
+        updateModePopup.addItems(withTitles: UpdateMode.allCases.map(\.title))
+        updateModePopup.selectItem(at: UpdateMode.allCases.firstIndex(of: Config.updateMode) ?? 1)
+        updateModePopup.toolTip = "Checks happen at launch, every 12 hours, and when the Mac wakes."
         status.stringValue = text
         results.isHidden = true
     }
@@ -801,8 +817,9 @@ final class SettingsWindow: NSWindowController {
         if let h = Int(hoursField.stringValue), h > 0, h <= 48 { d.set(h, forKey: "hours") }
         if let n = Int(daysField.stringValue), n > 0, n <= 14 { d.set(n, forKey: "days") }
         d.set(celsiusBox.state == .on, forKey: "celsiusFirst")
-        d.set(checkUpdatesBox.state == .on, forKey: "autoCheckUpdates")
-        d.set(autoInstallBox.state == .on, forKey: "autoInstallUpdates")
+        let mode = UpdateMode.allCases[max(0, updateModePopup.indexOfSelectedItem)]
+        d.set(mode.rawValue, forKey: "updateMode")
+        d.removeObject(forKey: "autoCheckUpdates"); d.removeObject(forKey: "autoInstallUpdates")   // superseded
         window?.close()
         onSave?()
     }
@@ -1042,7 +1059,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     @objc func checkForUpdatesManually() { checkForUpdates(userInitiated: true) }
 
     func checkForUpdates(userInitiated: Bool) {
-        guard userInitiated || Config.autoCheckUpdates, !installing else { return }
+        guard userInitiated || Config.updateMode != .off, !installing else { return }
         Config.lastUpdateCheck = Date()
         fetchLatestRelease { [weak self] r in DispatchQueue.main.async {
             guard let self = self else { return }
@@ -1052,7 +1069,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 if userInitiated { self.offerUpdate(rel); return }
                 if Config.skippedVersion == rel.version { return }
                 if let until = self.laterUntil[rel.version], Date() < until { return }   // "Later" was clicked recently
-                if Config.autoInstallUpdates { self.install(rel) } else { self.offerUpdate(rel) }
+                if Config.updateMode == .auto { self.install(rel) } else { self.offerUpdate(rel) }
             case .success:
                 self.availableUpdate = nil
                 if userInitiated { self.inform("WeatherBar is up to date", "Version \(appVersion) is the latest release.") }
