@@ -51,8 +51,8 @@ defaults write com.mayhoo.weatherbar latitude     -float 42.4806
 defaults write com.mayhoo.weatherbar longitude    -float -83.4755
 defaults write com.mayhoo.weatherbar useNWS       -bool false    # skip National Weather Service wording and alerts
 defaults write com.mayhoo.weatherbar celsiusFirst -bool true     # °C first, bar high/low in °C
-defaults write com.mayhoo.weatherbar hours        -int 10        # hourly cards
-defaults write com.mayhoo.weatherbar days         -int 7         # daily cards
+defaults write com.mayhoo.weatherbar hours        -int 10        # hourly cards, 1-48
+defaults write com.mayhoo.weatherbar days         -int 7         # daily cards, 1-14 (Open-Meteo forecasts 16 days)
 defaults write com.mayhoo.weatherbar menuWidth    -float 440     # width of each panel column
 defaults write com.mayhoo.weatherbar refreshMinutes -int 10
 defaults write com.mayhoo.weatherbar fontSize     -float 9       # menu bar text size

@@ -1,17 +1,19 @@
 # WeatherBar
 
 A small weather app for the Mac menu bar. It shows the current conditions with the temperature in °F
-and °C and the day's high and low. Click it for the hourly and 7-day forecast.
+and °C and the day's high and low. Click it for the hourly and daily forecast.
 
 ![Dropdown](docs/dropdown.png)
 
 ## Features
 
 - **Menu bar:** a conditions icon, the temperature in °F over °C, and the high over the low.
-- **Forecast panel:** current conditions and the day ahead at the top, then the next 10 hours and the
-  next 7 days. Every temperature is shown in both °F and °C.
+- **Forecast panel:** current conditions and the day ahead at the top, then the hours and days ahead.
+  You choose how many in Settings, up to 48 hours and 14 days. Every temperature is shown in both °F
+  and °C.
 - **Forecaster wording (US):** each day reads like "Mostly Cloudy then Chance Light Rain", with the
-  night's outlook. Hover over a day for the full forecast.
+  night's outlook. Hover over a day for the full forecast. The Weather Service covers 7 days; days
+  after that show a one-word summary.
 - **Weather alerts (US):** warnings, watches and advisories appear in a red band, and a red dot appears
   on the menu bar icon.
 - **Your location:** uses the Mac's location, or a place you choose in Settings.

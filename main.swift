@@ -19,8 +19,8 @@
 //   defaults write com.mayhoo.weatherbar fontSize  -float 9      # small stacked text size in the bar
 //   defaults write com.mayhoo.weatherbar bigFontSize -float 15   # the large current-temp number (if bigTemp)
 //   defaults write com.mayhoo.weatherbar bigTemp   -bool true    # also show a large current-temp number (off by default)
-//   defaults write com.mayhoo.weatherbar hours     -int 10       # hourly cards in the dropdown
-//   defaults write com.mayhoo.weatherbar days      -int 7        # daily cards in the dropdown
+//   defaults write com.mayhoo.weatherbar hours     -int 10       # hourly cards in the dropdown (1-48)
+//   defaults write com.mayhoo.weatherbar days      -int 7        # daily cards in the dropdown (1-14)
 //   defaults write com.mayhoo.weatherbar menuWidth -float 440    # width of EACH dropdown column (two columns)
 //
 // Test modes: WeatherBar --once            prints one fetch to stdout
@@ -78,8 +78,11 @@ enum Config {
     static var fontSize: CGFloat { let f = d.double(forKey: "fontSize"); return f > 0 ? CGFloat(f) : 9 }
     static var bigFontSize: CGFloat { let f = d.double(forKey: "bigFontSize"); return f > 0 ? CGFloat(f) : 15 }
     static var bigTemp: Bool { d.bool(forKey: "bigTemp") }   // default off: just the two stacked columns
-    static var hours: Int { let n = d.integer(forKey: "hours"); return n > 0 ? n : 10 }
-    static var days: Int { let n = d.integer(forKey: "days"); return n > 0 ? n : 7 }
+    // Open-Meteo forecasts 16 days and the request asks for days + 2, so 14 is the most that can be shown.
+    // Values set from Terminal are capped too: a bigger request would make Open-Meteo reject the whole fetch.
+    static let maxHours = 48, maxDays = 14
+    static var hours: Int { let n = d.integer(forKey: "hours"); return n > 0 ? min(n, maxHours) : 10 }
+    static var days: Int { let n = d.integer(forKey: "days"); return n > 0 ? min(n, maxDays) : 7 }
     static var menuWidth: CGFloat { let w = d.double(forKey: "menuWidth"); return w > 0 ? CGFloat(w) : 440 }
 }
 
@@ -1024,7 +1027,7 @@ final class SettingsWindow: NSWindowController {
 
         let searchRow = NSStackView(views: [search, searchBtn]); searchRow.spacing = 6
         let coordRow = NSStackView(views: [lbl("Lat"), latField, lbl("Lon"), lonField]); coordRow.spacing = 6
-        let countRow = NSStackView(views: [hoursField, lbl("hourly cards"), daysField, lbl("daily cards")]); countRow.spacing = 6
+        let countRow = NSStackView(views: [hoursField, lbl("hours (max \(Config.maxHours))"), daysField, lbl("days (max \(Config.maxDays))")]); countRow.spacing = 6
         let cancel = NSButton(title: "Cancel", target: self, action: #selector(cancel)); cancel.keyEquivalent = "\u{1b}"
         let save = NSButton(title: "Save", target: self, action: #selector(save)); save.keyEquivalent = "\r"
         let btnRow = NSStackView(views: [NSView(), cancel, save]); btnRow.spacing = 8
@@ -1122,8 +1125,9 @@ final class SettingsWindow: NSWindowController {
         if let la = Double(latField.stringValue), let lo = Double(lonField.stringValue), abs(la) <= 90, abs(lo) <= 180 {
             d.set(la, forKey: "latitude"); d.set(lo, forKey: "longitude")
         }
-        if let h = Int(hoursField.stringValue), h > 0, h <= 48 { d.set(h, forKey: "hours") }
-        if let n = Int(daysField.stringValue), n > 0, n <= 14 { d.set(n, forKey: "days") }
+        // too many becomes the maximum rather than being ignored
+        if let h = Int(hoursField.stringValue), h > 0 { d.set(min(h, Config.maxHours), forKey: "hours") }
+        if let n = Int(daysField.stringValue), n > 0 { d.set(min(n, Config.maxDays), forKey: "days") }
         d.set(celsiusBox.state == .on, forKey: "celsiusFirst")
         let mode = UpdateMode.allCases[max(0, updateModePopup.indexOfSelectedItem)]
         d.set(mode.rawValue, forKey: "updateMode")
