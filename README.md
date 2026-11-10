@@ -15,7 +15,8 @@ two-column forecast panel.
   feels-like and humidity.
 - **Dropdown, right column:** today's high and low, conditions, precipitation, humidity, wind,
   gusts, sunrise and sunset, then the next 7 days with highs, lows, conditions, precipitation chance,
-  rain amount, wind and gusts.
+  rain amount, wind and gusts. In the US, the conditions are the National Weather Service's own wording
+  for each day and night; hover over a day for the full forecast.
 - **Both units everywhere.** A Celsius-first setting flips every temperature, including the menu
   bar's high and low.
 - **Location:** uses this Mac's location through Location Services and shows it as "City, ST". If
@@ -89,6 +90,7 @@ Everything in the Settings window is a `defaults` key. Quit and relaunch after c
 
 ```bash
 defaults write com.mayhoo.weatherbar useLocation  -bool true     # use this Mac's location (default)
+defaults write com.mayhoo.weatherbar useNWS       -bool false    # skip National Weather Service wording
 defaults write com.mayhoo.weatherbar place        -string "Novi, MI"
 defaults write com.mayhoo.weatherbar latitude     -float 42.4806
 defaults write com.mayhoo.weatherbar longitude    -float -83.4755
@@ -161,7 +163,13 @@ release job fails if the tag doesn't match the version in `Info.plist`.
 
 ## Data and credits
 
-- Weather and place search from [Open-Meteo](https://open-meteo.com), free with no API key.
+- Weather numbers and place search from [Open-Meteo](https://open-meteo.com), free with no API key.
+- In the US, forecast wording from the [National Weather Service](https://www.weather.gov/documentation/services-web-api)
+  (`api.weather.gov`, free, no key): each day's phrase such as "Mostly Cloudy then Chance Light Rain",
+  the night's phrase, and the current period's full forecast in the Today card. Hover over a day for the
+  forecaster's full text. Elsewhere, or if NWS doesn't answer within 10 seconds, the cards show Open-Meteo's
+  one-word conditions. The temperatures always come from Open-Meteo, so they can differ by a few degrees
+  from the numbers inside the NWS text.
 - Icons are Apple SF Symbols, the same family Apple Weather uses.
 - **Why not Apple WeatherKit:** it requires a paid Apple Developer Program membership and an app
   signed with the WeatherKit entitlement. Switching would mean replacing `fetchWeather` with a

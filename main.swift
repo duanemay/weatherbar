@@ -11,6 +11,7 @@
 // The same keys via defaults (all optional):
 //   defaults write com.mayhoo.weatherbar useLocation -bool true   # default true
 //   defaults write com.mayhoo.weatherbar celsiusFirst -bool true  # °C before °F everywhere, bar H/L in °C
+//   defaults write com.mayhoo.weatherbar useNWS -bool false       # skip National Weather Service day wording
 //   defaults write com.mayhoo.weatherbar latitude  -float 42.4806
 //   defaults write com.mayhoo.weatherbar longitude -float -83.4755
 //   defaults write com.mayhoo.weatherbar place     -string "Novi, MI"
@@ -54,6 +55,7 @@ enum Config {
     static var lon: Double  { (d.object(forKey: "longitude") as? Double) ?? defaultLon }
     static var place: String { d.string(forKey: "place") ?? defaultPlace }
     static var celsiusFirst: Bool { d.bool(forKey: "celsiusFirst") }
+    static var useNWS: Bool { d.object(forKey: "useNWS") == nil ? true : d.bool(forKey: "useNWS") }
     /// "auto": install new versions without asking. "ask": prompt (default). "off": no automatic checks;
     /// Check for Updates… in the menu still works. Before 1.9 this was two checkboxes, autoCheckUpdates and
     /// autoInstallUpdates; their values are honoured until updateMode is saved once.
@@ -90,13 +92,15 @@ struct Hour {
 struct Day {
     let date: Date; let hiF: Double; let loF: Double; let code: Int
     let precip: Int; let rainIn: Double; let windMph: Double; let gustMph: Double; let sunrise: Date?; let sunset: Date?
+    var nwsDay: NWSText? = nil      // National Weather Service wording, US only
+    var nwsNight: NWSText? = nil
 }
 struct Weather {
     let tempF: Double; let feelsF: Double; let code: Int; let isDay: Bool
     let humidity: Int; let windMph: Double; let windDir: Int; let gustMph: Double
-    let today: Day
+    var today: Day
     let hourly: [Hour]
-    let daily: [Day]
+    var daily: [Day]
     let fetched: Date
 }
 
@@ -114,6 +118,27 @@ func mph(_ v: Double) -> String { "\(Int(v.rounded())) mph" }
 func compass(_ deg: Int) -> String {
     let names = ["N","NNE","NE","ENE","E","ESE","SE","SSE","S","SSW","SW","WSW","W","WNW","NW","NNW"]
     return names[Int((Double(deg) / 22.5).rounded()) % 16]
+}
+
+/// SF Symbol for National Weather Service wording, so the icon agrees with the words beside it.
+/// "Mostly Cloudy then Chance Light Rain" → rain: precipitation anywhere in the phrase wins.
+func nwsSymbol(_ text: String, isDay: Bool = true) -> String {
+    let t = text.lowercased()
+    if t.contains("thunder") { return "cloud.bolt.rain.fill" }
+    if t.contains("snow") && (t.contains("rain") || t.contains("sleet")) { return "cloud.sleet.fill" }
+    if t.contains("snow") || t.contains("flurr") || t.contains("blizzard") { return "cloud.snow.fill" }
+    if t.contains("sleet") || t.contains("freezing") || t.contains("ice") { return "cloud.sleet.fill" }
+    if t.contains("drizzle") { return "cloud.drizzle.fill" }
+    if t.contains("heavy rain") { return "cloud.heavyrain.fill" }
+    if t.contains("rain") || t.contains("shower") { return isDay ? "cloud.sun.rain.fill" : "cloud.moon.rain.fill" }
+    if t.contains("fog") || t.contains("haze") || t.contains("smoke") { return "cloud.fog.fill" }
+    if t.contains("wind") || t.contains("breezy") || t.contains("blustery") { return "wind" }
+    if t.contains("mostly cloudy") || t.hasPrefix("cloudy") || t.contains("overcast") { return "cloud.fill" }
+    if t.contains("partly") || t.contains("mostly sunny") || t.contains("mostly clear") {
+        return isDay ? "cloud.sun.fill" : "cloud.moon.fill"
+    }
+    if t.contains("sunny") || t.contains("clear") { return isDay ? "sun.max.fill" : "moon.stars.fill" }
+    return isDay ? "cloud.sun.fill" : "cloud.moon.fill"
 }
 
 /// WMO weather code → (SF Symbol name, plain-English description). Day/night variants where Apple has them.
@@ -227,12 +252,102 @@ func fetchWeather(_ place: Place, completion: @escaping (Result<Weather, Error>)
             var days: [Day] = []
             for i in 1..<dTimes.count { if let d = day(i) { days.append(d) }; if days.count >= Config.days { break } }
 
-            completion(.success(Weather(tempF: t, feelsF: cur["apparent_temperature"] as? Double ?? t, code: code,
-                                        isDay: (cur["is_day"] as? Int ?? 1) == 1, humidity: Int(num(cur, "relative_humidity_2m")),
-                                        windMph: num(cur, "wind_speed_10m"), windDir: Int(num(cur, "wind_direction_10m")),
-                                        gustMph: num(cur, "wind_gusts_10m"), today: today, hourly: hours, daily: days, fetched: Date())))
+            var w = Weather(tempF: t, feelsF: cur["apparent_temperature"] as? Double ?? t, code: code,
+                            isDay: (cur["is_day"] as? Int ?? 1) == 1, humidity: Int(num(cur, "relative_humidity_2m")),
+                            windMph: num(cur, "wind_speed_10m"), windDir: Int(num(cur, "wind_direction_10m")),
+                            gustMph: num(cur, "wind_gusts_10m"), today: today, hourly: hours, daily: days, fetched: Date())
+            guard Config.useNWS else { completion(.success(w)); return }
+            NWS.periods(for: place) { ps in
+                if let ps = ps { NWS.merge(ps, into: &w) }
+                completion(.success(w))
+            }
         } catch { completion(.failure(error)) }
     }.resume()
+}
+
+// MARK: - National Weather Service text (US only)
+//
+// Open-Meteo supplies every number. For US locations, api.weather.gov adds the forecaster's wording for each
+// day and night period ("Mostly Cloudy then Chance Light Rain"). Free, no key. Anything that fails or isn't
+// covered (outside the US, NWS slow or down) silently leaves the Open-Meteo one-word conditions in place.
+
+struct NWSText { let name: String; let short: String; let detail: String }
+
+struct NWSPeriod { let name: String; let start: Date; let isDaytime: Bool; let short: String; let detail: String
+    var text: NWSText { NWSText(name: name, short: short, detail: detail) }
+}
+
+enum NWS {
+    private static let lock = NSLock()
+    private static var forecastURL: [String: URL] = [:]       // place key -> gridpoint forecast URL
+    private static var notCovered: [String: Date] = [:]       // place key -> when /points said no (retry after 6 h)
+    private static var cached: (key: String, at: Date, periods: [NWSPeriod])?
+    private static let iso: ISO8601DateFormatter = { let f = ISO8601DateFormatter(); f.formatOptions = [.withInternetDateTime]; return f }()
+
+    static func request(_ url: URL) -> URLRequest {
+        var r = URLRequest(url: url, cachePolicy: .reloadIgnoringLocalCacheData, timeoutInterval: 10)
+        // NWS asks every client to identify itself
+        r.setValue("WeatherBar/\(appVersion) (github.com/duanemay/weatherbar)", forHTTPHeaderField: "User-Agent")
+        r.setValue("application/geo+json", forHTTPHeaderField: "Accept")
+        return r
+    }
+
+    static func json(_ url: URL, _ done: @escaping ([String: Any]?, Int) -> Void) {
+        URLSession.shared.dataTask(with: request(url)) { data, resp, _ in
+            let code = (resp as? HTTPURLResponse)?.statusCode ?? 0
+            done(code == 200 ? data.flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Any] } : nil, code)
+        }.resume()
+    }
+
+    /// The 12-hour forecast periods for `place`, or nil. Reuses a result younger than 30 minutes.
+    static func periods(for place: Place, completion: @escaping ([NWSPeriod]?) -> Void) {
+        let key = String(format: "%.4f,%.4f", place.lat, place.lon)
+        lock.lock()
+        if let c = cached, c.key == key, Date().timeIntervalSince(c.at) < 30 * 60 { lock.unlock(); completion(c.periods); return }
+        if let no = notCovered[key], Date().timeIntervalSince(no) < 6 * 3600 { lock.unlock(); completion(nil); return }
+        let known = forecastURL[key]
+        lock.unlock()
+
+        func fetchForecast(_ url: URL) {
+            json(url) { j, _ in
+                guard let props = j?["properties"] as? [String: Any], let raw = props["periods"] as? [[String: Any]] else {
+                    completion(nil); return
+                }
+                let ps: [NWSPeriod] = raw.compactMap { p in
+                    guard let name = p["name"] as? String, let s = p["startTime"] as? String, let start = iso.date(from: s),
+                          let short = p["shortForecast"] as? String else { return nil }
+                    return NWSPeriod(name: name, start: start, isDaytime: p["isDaytime"] as? Bool ?? true,
+                                     short: short, detail: p["detailedForecast"] as? String ?? short)
+                }
+                lock.lock(); cached = (key, Date(), ps); lock.unlock()
+                completion(ps)
+            }
+        }
+        if let url = known { fetchForecast(url); return }
+        guard let pointsURL = URL(string: "https://api.weather.gov/points/\(key)") else { completion(nil); return }
+        json(pointsURL) { j, code in
+            guard let s = (j?["properties"] as? [String: Any])?["forecast"] as? String, let url = URL(string: s) else {
+                if code == 404 { lock.lock(); notCovered[key] = Date(); lock.unlock() }   // outside NWS coverage
+                completion(nil); return
+            }
+            lock.lock(); forecastURL[key] = url; lock.unlock()
+            fetchForecast(url)
+        }
+    }
+
+    /// Attaches each day's daytime period and the night period that starts that evening.
+    static func merge(_ ps: [NWSPeriod], into w: inout Weather) {
+        let cal = Calendar.current
+        func attach(_ d: inout Day) {
+            d.nwsDay = ps.first { $0.isDaytime && cal.isDate($0.start, inSameDayAs: d.date) }?.text
+            // a night period starting after noon belongs to that date; an "Overnight" one starting
+            // after midnight belongs to the previous evening, so it's skipped
+            d.nwsNight = ps.first { !$0.isDaytime && cal.isDate($0.start, inSameDayAs: d.date)
+                                     && cal.component(.hour, from: $0.start) >= 12 }?.text
+        }
+        attach(&w.today)
+        for i in w.daily.indices { attach(&w.daily[i]) }
+    }
 }
 
 // MARK: - Geocoding (Open-Meteo, free) and this Mac's location
@@ -330,11 +445,12 @@ final class CardView: NSView {
 
 func makeLabel(_ text: String, size: CGFloat, weight: NSFont.Weight = .regular, color: NSColor = .labelColor,
                frame: NSRect, lines: Int = 1) -> NSTextField {
-    let l = lines > 1 ? NSTextField(wrappingLabelWithString: text) : NSTextField(labelWithString: text)
+    let wraps = lines != 1   // 0 = as many lines as the text needs
+    let l = wraps ? NSTextField(wrappingLabelWithString: text) : NSTextField(labelWithString: text)
     l.font = NSFont.systemFont(ofSize: size, weight: weight)
     l.textColor = color
     l.maximumNumberOfLines = lines
-    l.lineBreakMode = lines > 1 ? .byWordWrapping : .byTruncatingTail
+    l.lineBreakMode = wraps ? .byWordWrapping : .byTruncatingTail
     l.frame = frame
     return l
 }
@@ -342,25 +458,34 @@ func makeLabel(_ text: String, size: CGFloat, weight: NSFont.Weight = .regular, 
 /// One card: [leading label] [icon] [headline / subline] [detail text, wraps].
 /// `detailLead`, when given, starts the right-hand text in the primary colour (e.g. the day's conditions),
 /// so it can wrap across the wide right side instead of being cut off under the temperatures.
-func card(width: CGFloat, height: CGFloat, leading: String, icon: String, headline: String, subline: String, detail: String,
-          detailLead: String? = nil) -> NSView {
+/// The card grows taller when the right-hand text needs more than fits in `height`. `tooltip` shows on hover.
+func card(width: CGFloat, height minHeight: CGFloat, leading: String, icon: String, headline: String, subline: String,
+          detail: String, detailLead: String? = nil, tooltip: String? = nil) -> NSView {
+    let detailX: CGFloat = 236, detailW = width - 236 - 14
+    let detailLabel = makeLabel(detail, size: 10.5, color: .secondaryLabelColor,
+                                frame: NSRect(x: detailX, y: 5, width: detailW, height: 10), lines: 0)
+    if let lead = detailLead {
+        let t = NSMutableAttributedString(string: lead, attributes: [
+            .font: NSFont.systemFont(ofSize: 10.5, weight: .semibold), .foregroundColor: NSColor.labelColor])
+        if !detail.isEmpty {
+            t.append(NSAttributedString(string: " • " + detail, attributes: [
+                .font: NSFont.systemFont(ofSize: 10.5), .foregroundColor: NSColor.secondaryLabelColor]))
+        }
+        detailLabel.attributedStringValue = t
+    }
+    let textH = ceil(detailLabel.cell?.cellSize(forBounds: NSRect(x: 0, y: 0, width: detailW, height: 10_000)).height ?? 0)
+    let height = max(minHeight, textH + 12)
+    detailLabel.frame = NSRect(x: detailX, y: height - 6 - textH, width: detailW, height: textH)   // top-aligned
+
     let v = CardView(frame: NSRect(x: 0, y: 0, width: width, height: height))
+    v.toolTip = tooltip
     let midY = height / 2
-    v.addSubview(makeLabel(leading, size: 12, weight: .semibold, frame: NSRect(x: 14, y: midY - 8, width: 44, height: 16)))
+    v.addSubview(makeLabel(leading, size: 12, weight: .semibold, frame: NSRect(x: 14, y: midY - 8, width: 80, height: 16)))
     let iv = NSImageView(frame: NSRect(x: 60, y: midY - 15, width: 30, height: 30))
     iv.image = symbolImage(icon, size: 24); iv.imageScaling = .scaleProportionallyUpOrDown
     v.addSubview(iv)
     v.addSubview(makeLabel(headline, size: 14, weight: .bold, frame: NSRect(x: 98, y: midY + 1, width: 136, height: 18)))
     v.addSubview(makeLabel(subline, size: 11, color: .secondaryLabelColor, frame: NSRect(x: 98, y: midY - 15, width: 136, height: 14)))
-    let detailLabel = makeLabel(detail, size: 10.5, color: .secondaryLabelColor,
-                                frame: NSRect(x: 236, y: 5, width: width - 236 - 14, height: height - 10), lines: 3)
-    if let lead = detailLead {
-        let t = NSMutableAttributedString(string: lead, attributes: [
-            .font: NSFont.systemFont(ofSize: 10.5, weight: .semibold), .foregroundColor: NSColor.labelColor])
-        t.append(NSAttributedString(string: " • " + detail, attributes: [
-            .font: NSFont.systemFont(ofSize: 10.5), .foregroundColor: NSColor.secondaryLabelColor]))
-        detailLabel.attributedStringValue = t
-    }
     v.addSubview(detailLabel)
     return v
 }
@@ -380,15 +505,29 @@ func currentCard(_ w: Weather, width: CGFloat) -> NSView {
 }
 
 func todayCard(_ w: Weather, width: CGFloat) -> NSView {
-    let height: CGFloat = 88
-    let v = CardView(frame: NSRect(x: 0, y: 0, width: width, height: height))
     let t = w.today
     let (_, desc) = symbol(for: t.code, isDay: true)
+    let tw = width - 32
+    // NWS: the period still ahead today ("This Afternoon: …", or "Tonight: …" in the evening)
+    let label: NSTextField
+    if let p = t.nwsDay ?? t.nwsNight {
+        let a = NSMutableAttributedString(string: p.name + ": ", attributes: [
+            .font: NSFont.systemFont(ofSize: 11, weight: .semibold), .foregroundColor: NSColor.labelColor])
+        a.append(NSAttributedString(string: p.detail, attributes: [
+            .font: NSFont.systemFont(ofSize: 11), .foregroundColor: NSColor.secondaryLabelColor]))
+        label = makeLabel("", size: 11, frame: .zero, lines: 0); label.attributedStringValue = a
+    } else {
+        label = makeLabel(desc, size: 11, color: .secondaryLabelColor, frame: .zero, lines: 0)
+    }
+    let detail = makeLabel(todayDetail(w), size: 10.5, color: .secondaryLabelColor, frame: .zero, lines: 0)
+    func h(_ f: NSTextField) -> CGFloat { ceil(f.cell?.cellSize(forBounds: NSRect(x: 0, y: 0, width: tw, height: 10_000)).height ?? 15) }
+    let lh = h(label), dh = h(detail)
+    let height = 8 + 22 + 4 + lh + 6 + dh + 8
+    let v = CardView(frame: NSRect(x: 0, y: 0, width: width, height: height))
     v.addSubview(makeLabel("Hi \(fc(t.hiF))   Lo \(fc(t.loF))", size: 16, weight: .bold,
-                           frame: NSRect(x: 16, y: height - 30, width: width - 32, height: 22)))
-    v.addSubview(makeLabel(desc, size: 11, color: .secondaryLabelColor, frame: NSRect(x: 16, y: height - 48, width: width - 32, height: 15)))
-    v.addSubview(makeLabel(todayDetail(w), size: 10.5, color: .secondaryLabelColor,
-                           frame: NSRect(x: 16, y: 6, width: width - 32, height: 30), lines: 2))
+                           frame: NSRect(x: 16, y: height - 30, width: tw, height: 22)))
+    label.frame = NSRect(x: 16, y: height - 34 - lh, width: tw, height: lh); v.addSubview(label)
+    detail.frame = NSRect(x: 16, y: 8, width: tw, height: dh); v.addSubview(detail)
     return v
 }
 
@@ -400,9 +539,15 @@ func hourCard(_ h: Hour, width: CGFloat) -> NSView {
 
 func dayCard(_ d: Day, width: CGFloat) -> NSView {
     let (sym, desc) = symbol(for: d.code, isDay: true)
-    return card(width: width, height: 54, leading: dayFmt.string(from: d.date), icon: sym,
+    // NWS wording when available (US); otherwise Open-Meteo's one-word conditions
+    let lead = d.nwsDay?.short ?? d.nwsNight?.short ?? desc
+    let icon = d.nwsDay.map { nwsSymbol($0.short) } ?? d.nwsNight.map { nwsSymbol($0.short, isDay: false) } ?? sym
+    var detail = dayDetail(d)
+    if d.nwsDay != nil, let night = d.nwsNight { detail = "Night: \(night.short) • " + detail }
+    let tip = [d.nwsDay, d.nwsNight].compactMap { $0 }.map { "\($0.name): \($0.detail)" }.joined(separator: "\n\n")
+    return card(width: width, height: 54, leading: dayFmt.string(from: d.date), icon: icon,
                 headline: "\(primary(d.hiF)) / \(primary(d.loF))", subline: "\(secondary(d.hiF)) / \(secondary(d.loF))",
-                detail: dayDetail(d), detailLead: desc)
+                detail: detail, detailLead: lead, tooltip: tip.isEmpty ? nil : tip)
 }
 
 func headerLabel(_ title: String, width: CGFloat) -> NSView {
@@ -874,6 +1019,7 @@ final class AboutWindow: NSWindowController {
         let stack = NSStackView(views: [iv, l("WeatherBar", 18, .bold), l("Version \(appVersion) · built \(buildDate)", 12, .regular, .secondaryLabelColor),
                                         l("Duane May", 14, .medium),
                                         l("Weather data by Open-Meteo.com", 11, .regular, .secondaryLabelColor),
+                                        l("US forecast text: National Weather Service", 11, .regular, .secondaryLabelColor),
                                         l("Icons: Apple SF Symbols", 11, .regular, .secondaryLabelColor)])
         stack.orientation = .vertical; stack.spacing = 6; stack.alignment = .centerX
         stack.setCustomSpacing(14, after: iv)
@@ -912,7 +1058,8 @@ if let i = CommandLine.arguments.firstIndex(of: "--once"), i > 0 {
             print("\(Config.place): \(desc) [\(sym)]  bar: \(primary(w.tempF)) H \(primaryDeg(w.today.hiF)) / \(secondary(w.tempF)) L \(primaryDeg(w.today.loF))")
             print("Current: \(fc(w.tempF)), feels \(fc(w.feelsF)) • \(todayDetail(w))")
             print("Next hours:"); for h in w.hourly.prefix(Config.hours) { print("  \(hourFmt.string(from: h.time))  \(fc(h.tempF))  \(symbol(for: h.code, isDay: h.isDay).1)  \(hourDetail(h))") }
-            print("Next days:");  for d in w.daily.prefix(Config.days) { print("  \(dayFmt.string(from: d.date))  \(fc(d.hiF)) / \(fc(d.loF))  \(symbol(for: d.code, isDay: true).1)  \(dayDetail(d))") }
+            if let p = w.today.nwsDay ?? w.today.nwsNight { print("NWS \(p.name): \(p.detail)") } else { print("NWS: none") }
+            print("Next days:");  for d in w.daily.prefix(Config.days) { print("  \(dayFmt.string(from: d.date))  \(fc(d.hiF)) / \(fc(d.loF))  \(d.nwsDay?.short ?? d.nwsNight?.short ?? symbol(for: d.code, isDay: true).1)\(d.nwsDay != nil && d.nwsNight != nil ? " / night: " + d.nwsNight!.short : "")  \(dayDetail(d))") }
         case .failure(let e): print("ERROR: \(e.localizedDescription)")
         }
         sem.signal()
