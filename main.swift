@@ -509,6 +509,10 @@ func makeLabel(_ text: String, size: CGFloat, weight: NSFont.Weight = .regular, 
     l.textColor = color
     l.maximumNumberOfLines = lines
     l.lineBreakMode = wraps ? .byWordWrapping : .byTruncatingTail
+    // wrapping labels are selectable by default; a click then redraws them as plain text and drops any
+    // bold in an attributed string. Nothing here needs selecting.
+    l.isSelectable = false
+    l.allowsEditingTextAttributes = true
     l.frame = frame
     return l
 }
