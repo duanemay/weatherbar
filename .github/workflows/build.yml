@@ -109,6 +109,37 @@ jobs:
             exit 1
           fi
 
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0          # full history and tags, to list what changed since the last release
+          persist-credentials: false
+
+      - name: Write release notes
+        # Users read these in the app's update prompt, so they list what changed in the app itself:
+        # commits since the previous tag that touched the app's own files (not CI, README or Dependabot).
+        # A summary written in an annotated tag's message goes first.
+        run: |
+          tag="$GITHUB_REF_NAME"
+          prev=$(git describe --tags --abbrev=0 "$tag^" 2>/dev/null || true)
+          range="${prev:+$prev..}$tag"
+          {
+            summary=""
+            # only an annotated tag carries its own message (a lightweight tag would echo a commit's)
+            if [ "$(git cat-file -t "$tag")" = tag ]; then
+              summary=$(git tag -l --format='%(contents)' "$tag" | sed -e '/^-----BEGIN/,$d' -e '/^Co-Authored-By:/Id')
+            fi
+            # skip the default one-line "WeatherBar x.y" message
+            if [ -n "$summary" ] && [ "$summary" != "WeatherBar ${tag#v}" ]; then
+              printf '%s\n\n' "$summary"
+            fi
+            echo "What's new:"
+            git log --no-merges --reverse --format='%s' "$range" -- main.swift Info.plist icon.png \
+              | sed -E 's/^[0-9]+(\.[0-9]+)+: *//' \
+              | while IFS= read -r line; do printf -- '- %s\n' "${line^}"; done
+          } > notes.md
+          grep -q '^- ' notes.md || echo "- Maintenance release." >> notes.md
+          cat notes.md
+
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: WeatherBar-${{ needs.build.outputs.version }}
@@ -120,4 +151,4 @@ jobs:
           z="WeatherBar-${{ needs.build.outputs.version }}.zip"
           sha256sum -c "$z.sha256"
           gh release create "$GITHUB_REF_NAME" "$z" "$z.sha256" \
-            --repo "$GITHUB_REPOSITORY" --title "WeatherBar $GITHUB_REF_NAME" --generate-notes
+            --repo "$GITHUB_REPOSITORY" --title "WeatherBar $GITHUB_REF_NAME" --notes-file notes.md
