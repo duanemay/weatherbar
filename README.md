@@ -80,8 +80,21 @@ The new copy is unpacked beside the old one. After WeatherBar quits, a short scr
 restores the old copy if the swap fails, and relaunches. The checks need the repository to be public,
 because GitHub's release API returns 404 to unauthenticated requests for a private repo.
 
-Releases are ad-hoc signed, not signed with an Apple Developer ID. macOS ties some permissions to the
-signature, so it may ask for Location access again after an update.
+## Code signing
+
+Releases from 1.14 on are signed with a self-signed **WeatherBar Code Signing** certificate (SHA-1
+`305D14CB4AA12B2559947D3F4CD41D4510371334`). Because every version carries the same signing identity,
+macOS keeps permissions such as Location across updates. The updater also requires that certificate: a
+download signed by anything else is refused, even if its checksum file matches.
+
+The certificate is not from Apple, so Gatekeeper still treats a downloaded copy as coming from an
+unidentified developer on first launch (right-click, then Open). Updates installed by the app itself are
+not quarantined and open normally.
+
+CI imports the certificate from the `SIGNING_CERT_P12` and `SIGNING_CERT_PASSWORD` Actions secrets into a
+temporary keychain and passes it to `build.sh` through `SIGN_IDENTITY` and `SIGN_KEYCHAIN`. Local builds
+without those variables are ad-hoc signed, which is fine for development. Release builds fail if they
+aren't signed with the certificate.
 
 **From source:**
 

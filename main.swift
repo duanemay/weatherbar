@@ -803,6 +803,12 @@ func plainNotes(_ md: String) -> String {
         .trimmingCharacters(in: .whitespacesAndNewlines)
 }
 
+/// Every release since 1.14 is signed with the self-signed "WeatherBar Code Signing" certificate. An update is
+/// installed only if it carries that same certificate, so a tampered download can't replace the app even if
+/// its checksum file was swapped too. Changing the certificate means shipping this requirement first.
+let releaseSigningRequirement =
+    #"identifier "com.mayhoo.weatherbar" and certificate root = H"305d14cb4aa12b2559947d3f4cd41d4510371334""#
+
 /// true when `a` is a newer dotted version than `b` ("1.10" > "1.9").
 func isNewer(_ a: String, than b: String) -> Bool {
     let x = a.split(separator: ".").map { Int($0) ?? 0 }, y = b.split(separator: ".").map { Int($0) ?? 0 }
@@ -934,6 +940,8 @@ func prepareUpdate(_ rel: Release, replacing appURL: URL, completion: @escaping 
                 guard info["CFBundleShortVersionString"] as? String == rel.version else { throw UpdateError.verify("version mismatch") }
                 let (vc, vout) = runTool("/usr/bin/codesign", ["--verify", "--strict", newApp.path])
                 guard vc == 0 else { throw UpdateError.verify("signature check: \(vout)") }
+                let (rc, rout) = runTool("/usr/bin/codesign", ["--verify", "-R=" + releaseSigningRequirement, newApp.path])
+                guard rc == 0 else { throw UpdateError.verify("not signed with the WeatherBar certificate: \(rout)") }
                 done(.success(newApp))
             } catch {
                 done(.failure(error))
