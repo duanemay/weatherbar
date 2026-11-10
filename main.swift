@@ -329,7 +329,10 @@ func makeLabel(_ text: String, size: CGFloat, weight: NSFont.Weight = .regular, 
 }
 
 /// One card: [leading label] [icon] [headline / subline] [detail text, wraps].
-func card(width: CGFloat, height: CGFloat, leading: String, icon: String, headline: String, subline: String, detail: String) -> NSView {
+/// `detailLead`, when given, starts the right-hand text in the primary colour (e.g. the day's conditions),
+/// so it can wrap across the wide right side instead of being cut off under the temperatures.
+func card(width: CGFloat, height: CGFloat, leading: String, icon: String, headline: String, subline: String, detail: String,
+          detailLead: String? = nil) -> NSView {
     let v = CardView(frame: NSRect(x: 0, y: 0, width: width, height: height))
     let midY = height / 2
     v.addSubview(makeLabel(leading, size: 12, weight: .semibold, frame: NSRect(x: 14, y: midY - 8, width: 44, height: 16)))
@@ -338,8 +341,16 @@ func card(width: CGFloat, height: CGFloat, leading: String, icon: String, headli
     v.addSubview(iv)
     v.addSubview(makeLabel(headline, size: 14, weight: .bold, frame: NSRect(x: 98, y: midY + 1, width: 136, height: 18)))
     v.addSubview(makeLabel(subline, size: 11, color: .secondaryLabelColor, frame: NSRect(x: 98, y: midY - 15, width: 136, height: 14)))
-    v.addSubview(makeLabel(detail, size: 10.5, color: .secondaryLabelColor,
-                           frame: NSRect(x: 236, y: 5, width: width - 236 - 14, height: height - 10), lines: 3))
+    let detailLabel = makeLabel(detail, size: 10.5, color: .secondaryLabelColor,
+                                frame: NSRect(x: 236, y: 5, width: width - 236 - 14, height: height - 10), lines: 3)
+    if let lead = detailLead {
+        let t = NSMutableAttributedString(string: lead, attributes: [
+            .font: NSFont.systemFont(ofSize: 10.5, weight: .semibold), .foregroundColor: NSColor.labelColor])
+        t.append(NSAttributedString(string: " • " + detail, attributes: [
+            .font: NSFont.systemFont(ofSize: 10.5), .foregroundColor: NSColor.secondaryLabelColor]))
+        detailLabel.attributedStringValue = t
+    }
+    v.addSubview(detailLabel)
     return v
 }
 
@@ -379,8 +390,8 @@ func hourCard(_ h: Hour, width: CGFloat) -> NSView {
 func dayCard(_ d: Day, width: CGFloat) -> NSView {
     let (sym, desc) = symbol(for: d.code, isDay: true)
     return card(width: width, height: 54, leading: dayFmt.string(from: d.date), icon: sym,
-                headline: "\(primary(d.hiF)) / \(primary(d.loF))", subline: "\(secondary(d.hiF)) / \(secondary(d.loF)) • \(desc)",
-                detail: dayDetail(d))
+                headline: "\(primary(d.hiF)) / \(primary(d.loF))", subline: "\(secondary(d.hiF)) / \(secondary(d.loF))",
+                detail: dayDetail(d), detailLead: desc)
 }
 
 func headerLabel(_ title: String, width: CGFloat) -> NSView {
