@@ -469,7 +469,7 @@ func populate(_ menu: NSMenu, place: Place, note: String?, weather last: Weather
     }
     menu.addItem(withTitle: "Check for Updates…", action: #selector(AppDelegate.checkForUpdatesManually), keyEquivalent: "").target = target
     menu.addItem(withTitle: "Settings…", action: #selector(AppDelegate.showSettings), keyEquivalent: ",").target = target
-    menu.addItem(withTitle: "About WeatherBar", action: #selector(AppDelegate.showAbout), keyEquivalent: "").target = target
+    menu.addItem(withTitle: "About WeatherBar v\(appVersion)", action: #selector(AppDelegate.showAbout), keyEquivalent: "").target = target
     menu.addItem(.separator())
     menu.addItem(withTitle: "Quit WeatherBar", action: #selector(AppDelegate.quit), keyEquivalent: "q").target = target
 }
