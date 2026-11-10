@@ -1,3 +1,5 @@
+![WeatherBar](docs/social-preview.png)
+
 # WeatherBar
 
 A small weather app for the Mac menu bar. It shows the current conditions with the temperature in °F
