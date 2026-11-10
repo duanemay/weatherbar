@@ -498,6 +498,22 @@ enum UpdateError: LocalizedError {
     }
 }
 
+/// Release notes as plain text for the update prompt: drops link-only lines (GitHub's "Full Changelog")
+/// and markdown markers, keeps the bullet points.
+func plainNotes(_ md: String) -> String {
+    md.components(separatedBy: .newlines)
+        .filter { !$0.contains("http://") && !$0.contains("https://") }
+        .map { line -> String in
+            var l = line.replacingOccurrences(of: "**", with: "").replacingOccurrences(of: "`", with: "")
+            while l.hasPrefix("#") { l.removeFirst() }
+            if l.hasPrefix("- ") || l.hasPrefix("* ") { l = "• " + l.dropFirst(2) }
+            return l.trimmingCharacters(in: .whitespaces)
+        }
+        .joined(separator: "\n")
+        .replacingOccurrences(of: "\n\n\n", with: "\n\n")
+        .trimmingCharacters(in: .whitespacesAndNewlines)
+}
+
 /// true when `a` is a newer dotted version than `b` ("1.10" > "1.9").
 func isNewer(_ a: String, than b: String) -> Bool {
     let x = a.split(separator: ".").map { Int($0) ?? 0 }, y = b.split(separator: ".").map { Int($0) ?? 0 }
@@ -1026,7 +1042,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     func offerUpdate(_ rel: Release) {
         let a = NSAlert()
         a.messageText = "WeatherBar \(rel.version) is available"
-        let notes = rel.notes.trimmingCharacters(in: .whitespacesAndNewlines)
+        let notes = plainNotes(rel.notes)
         a.informativeText = "You have \(appVersion)." + (notes.isEmpty ? "" : "\n\n" + String(notes.prefix(600)))
         a.addButton(withTitle: "Install and Relaunch")
         a.addButton(withTitle: "Later")
