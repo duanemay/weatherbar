@@ -95,6 +95,28 @@ struct Day {
     var nwsDay: NWSText? = nil      // National Weather Service wording, US only
     var nwsNight: NWSText? = nil
 }
+struct WeatherAlert {
+    let event: String          // "Winter Storm Warning"
+    let severity: String       // Extreme, Severe, Moderate, Minor, Unknown
+    let headline: String
+    let ends: Date?
+    let sender: String         // "NWS Detroit/Pontiac MI"
+    let description: String
+    let instruction: String
+
+    /// The "WHAT..." part of an NWS description ("Snow expected. Total accumulations of 4 to 7 inches."),
+    /// which says the most in the fewest words; otherwise the first sentence or two.
+    var summary: String {
+        let text = description.replacingOccurrences(of: "\n", with: " ")
+        if let r = text.range(of: "WHAT...") {
+            let rest = text[r.upperBound...]
+            let end = rest.range(of: "* ")?.lowerBound ?? rest.endIndex
+            return rest[..<end].trimmingCharacters(in: .whitespaces)
+        }
+        return String(text.prefix(220)).trimmingCharacters(in: .whitespaces)
+    }
+}
+
 struct Weather {
     let tempF: Double; let feelsF: Double; let code: Int; let isDay: Bool
     let humidity: Int; let windMph: Double; let windDir: Int; let gustMph: Double
@@ -102,6 +124,7 @@ struct Weather {
     let hourly: [Hour]
     var daily: [Day]
     let fetched: Date
+    var alerts: [WeatherAlert] = []   // NWS, US only
 }
 
 struct Place { var lat: Double; var lon: Double; var name: String; var fromMac = false }
@@ -257,8 +280,14 @@ func fetchWeather(_ place: Place, completion: @escaping (Result<Weather, Error>)
                             windMph: num(cur, "wind_speed_10m"), windDir: Int(num(cur, "wind_direction_10m")),
                             gustMph: num(cur, "wind_gusts_10m"), today: today, hourly: hours, daily: days, fetched: Date())
             guard Config.useNWS else { completion(.success(w)); return }
-            NWS.periods(for: place) { ps in
-                if let ps = ps { NWS.merge(ps, into: &w) }
+            // forecast wording and active alerts, fetched side by side
+            let group = DispatchGroup(); let lock = NSLock()
+            var periods: [NWSPeriod]?, alerts: [WeatherAlert]?
+            group.enter(); NWS.periods(for: place) { r in lock.lock(); periods = r; lock.unlock(); group.leave() }
+            group.enter(); NWS.alerts(for: place) { r in lock.lock(); alerts = r; lock.unlock(); group.leave() }
+            group.notify(queue: .global()) {
+                if let ps = periods { NWS.merge(ps, into: &w) }
+                w.alerts = alerts ?? []
                 completion(.success(w))
             }
         } catch { completion(.failure(error)) }
@@ -332,6 +361,35 @@ enum NWS {
             }
             lock.lock(); forecastURL[key] = url; lock.unlock()
             fetchForecast(url)
+        }
+    }
+
+    // MARK: Alerts
+
+    /// Active alerts for `place` (warnings, watches, advisories), most severe first. Empty when there are
+    /// none; nil when the place isn't covered or NWS didn't answer.
+    static func alerts(for place: Place, completion: @escaping ([WeatherAlert]?) -> Void) {
+        let key = String(format: "%.4f,%.4f", place.lat, place.lon)
+        lock.lock(); let uncovered = notCovered[key].map { Date().timeIntervalSince($0) < 6 * 3600 } ?? false; lock.unlock()
+        guard !uncovered, let url = URL(string: "https://api.weather.gov/alerts/active?status=actual&point=\(key)") else {
+            completion(nil); return
+        }
+        json(url) { j, _ in
+            guard let features = j?["features"] as? [[String: Any]] else { completion(nil); return }
+            let rank = ["Extreme": 0, "Severe": 1, "Moderate": 2, "Minor": 3]
+            var seen = Set<String>()
+            let list: [WeatherAlert] = features.compactMap { f in
+                guard let p = f["properties"] as? [String: Any], let event = p["event"] as? String,
+                      (p["messageType"] as? String) != "Cancel" else { return nil }
+                let ends = (p["ends"] as? String ?? p["expires"] as? String).flatMap { iso.date(from: $0) }
+                if let e = ends, e < Date() { return nil }
+                guard seen.insert(event + "|" + (ends.map { "\($0)" } ?? "")).inserted else { return nil }   // NWS repeats updates
+                return WeatherAlert(event: event, severity: p["severity"] as? String ?? "Unknown",
+                                    headline: p["headline"] as? String ?? event, ends: ends,
+                                    sender: p["senderName"] as? String ?? "National Weather Service",
+                                    description: p["description"] as? String ?? "", instruction: p["instruction"] as? String ?? "")
+            }
+            completion(list.sorted { (rank[$0.severity] ?? 9) < (rank[$1.severity] ?? 9) })
         }
     }
 
@@ -556,6 +614,61 @@ func headerLabel(_ title: String, width: CGFloat) -> NSView {
     let v = NSView(frame: NSRect(x: 0, y: 0, width: width, height: 22)); v.addSubview(l); return v
 }
 
+/// Where the alert dot goes: over the top-right of the weather icon, in the status button's coordinates.
+/// The bar image is drawn centred in the button.
+func alertDotFrame(button: NSSize, image: NSSize, icon: NSRect, flipped: Bool) -> NSRect {
+    let d: CGFloat = 7
+    let ox = (button.width - image.width) / 2, oy = (button.height - image.height) / 2
+    let x = ox + icon.maxX - d + 1.5
+    let yUp = oy + icon.maxY - d + 1   // y measured from the bottom
+    return NSRect(x: x, y: flipped ? button.height - yUp - d : yUp, width: d, height: d)
+}
+
+/// A red-tinted card for one weather alert.
+final class AlertCardView: NSView {
+    override func draw(_ dirtyRect: NSRect) {
+        let path = NSBezierPath(roundedRect: bounds.insetBy(dx: 6, dy: 2), xRadius: 8, yRadius: 8)
+        NSColor.windowBackgroundColor.withAlphaComponent(0.92).setFill(); path.fill()
+        NSColor.systemRed.withAlphaComponent(0.22).setFill(); path.fill()
+        NSColor.systemRed.withAlphaComponent(0.7).setStroke(); path.lineWidth = 1; path.stroke()
+    }
+}
+
+let alertEndFmt: DateFormatter = { let f = DateFormatter(); f.dateFormat = "EEE h:mm a"; return f }()
+
+func alertCard(_ a: WeatherAlert, width: CGFloat) -> NSView {
+    let textX: CGFloat = 52, textW = width - textX - 18
+    let title = makeLabel(a.event, size: 13, weight: .bold, frame: .zero)
+    let meta = makeLabel([a.ends.map { "Until \(alertEndFmt.string(from: $0))" }, a.sender].compactMap { $0 }.joined(separator: " • "),
+                         size: 10.5, color: .secondaryLabelColor, frame: .zero)
+    let body = makeLabel(a.summary, size: 11, frame: .zero, lines: 0)
+    func h(_ f: NSTextField) -> CGFloat { ceil(f.cell?.cellSize(forBounds: NSRect(x: 0, y: 0, width: textW, height: 10_000)).height ?? 14) }
+    let th = h(title), mh = h(meta), bh = a.summary.isEmpty ? 0 : h(body)
+    let height = 10 + th + 2 + mh + (bh > 0 ? 4 + bh : 0) + 10
+    let v = AlertCardView(frame: NSRect(x: 0, y: 0, width: width, height: height))
+    v.toolTip = [a.headline, a.description, a.instruction].filter { !$0.isEmpty }.joined(separator: "\n\n")
+    let icon = NSImageView(frame: NSRect(x: 16, y: height - 10 - 26, width: 26, height: 26))
+    icon.image = NSImage(systemSymbolName: "exclamationmark.triangle.fill", accessibilityDescription: "Alert")?
+        .withSymbolConfiguration(NSImage.SymbolConfiguration(pointSize: 20, weight: .semibold))
+    icon.contentTintColor = .systemRed
+    v.addSubview(icon)
+    var y = height - 10 - th
+    title.frame = NSRect(x: textX, y: y, width: textW, height: th); v.addSubview(title)
+    y -= 2 + mh
+    meta.frame = NSRect(x: textX, y: y, width: textW, height: mh); v.addSubview(meta)
+    if bh > 0 { y -= 4 + bh; body.frame = NSRect(x: textX, y: y, width: textW, height: bh); v.addSubview(body) }
+    return v
+}
+
+/// Full-width band of alert cards with a red heading; nil when there are no alerts.
+func alertsBand(_ alerts: [WeatherAlert], width: CGFloat) -> NSView? {
+    guard !alerts.isEmpty else { return nil }
+    let head = makeLabel(alerts.count == 1 ? "WEATHER ALERT" : "WEATHER ALERTS (\(alerts.count))", size: 11, weight: .semibold,
+                         color: .systemRed, frame: NSRect(x: 14, y: 0, width: width - 28, height: 16))
+    let hv = NSView(frame: NSRect(x: 0, y: 0, width: width, height: 22)); hv.addSubview(head)
+    return column([hv] + alerts.map { alertCard($0, width: width) }, width: width)
+}
+
 /// Lays `views` out top-to-bottom in a column of `width`; returns the column view.
 func column(_ views: [NSView], width: CGFloat) -> NSView {
     let gap: CGFloat = 4
@@ -567,18 +680,23 @@ func column(_ views: [NSView], width: CGFloat) -> NSView {
 }
 
 /// The whole dropdown body: left = Current + Next hours, right = Today + Next days.
+/// The dropdown body, in bands: Current | Today, then any weather alerts across the full width,
+/// then Next hours | Next days.
 func dashboardView(_ wx: Weather, colWidth: CGFloat) -> NSView {
-    var left: [NSView] = [headerLabel("Current", width: colWidth), currentCard(wx, width: colWidth), headerLabel("Next hours", width: colWidth)]
-    left += wx.hourly.prefix(Config.hours).map { hourCard($0, width: colWidth) }
-    var right: [NSView] = [headerLabel("Today", width: colWidth), todayCard(wx, width: colWidth), headerLabel("Next days", width: colWidth)]
-    right += wx.daily.prefix(Config.days).map { dayCard($0, width: colWidth) }
-    let l = column(left, width: colWidth), r = column(right, width: colWidth)
-    let h = max(l.frame.height, r.frame.height)
-    let v = NSView(frame: NSRect(x: 0, y: 0, width: colWidth * 2, height: h))
-    l.frame.origin = NSPoint(x: 0, y: h - l.frame.height)            // both columns top-aligned
-    r.frame.origin = NSPoint(x: colWidth, y: h - r.frame.height)
-    v.addSubview(l); v.addSubview(r)
-    return v
+    func pair(_ left: [NSView], _ right: [NSView]) -> NSView {
+        let l = column(left, width: colWidth), r = column(right, width: colWidth)
+        let h = max(l.frame.height, r.frame.height)
+        let v = NSView(frame: NSRect(x: 0, y: 0, width: colWidth * 2, height: h))
+        l.frame.origin = NSPoint(x: 0, y: h - l.frame.height)            // top-aligned
+        r.frame.origin = NSPoint(x: colWidth, y: h - r.frame.height)
+        v.addSubview(l); v.addSubview(r)
+        return v
+    }
+    let top = pair([headerLabel("Current", width: colWidth), currentCard(wx, width: colWidth)],
+                   [headerLabel("Today", width: colWidth), todayCard(wx, width: colWidth)])
+    let bottom = pair([headerLabel("Next hours", width: colWidth)] + wx.hourly.prefix(Config.hours).map { hourCard($0, width: colWidth) },
+                      [headerLabel("Next days", width: colWidth)] + wx.daily.prefix(Config.days).map { dayCard($0, width: colWidth) })
+    return column([top, alertsBand(wx.alerts, width: colWidth * 2), bottom].compactMap { $0 }, width: colWidth * 2)
 }
 
 func sectionHeader(_ title: String) -> NSMenuItem {
@@ -1059,6 +1177,7 @@ if let i = CommandLine.arguments.firstIndex(of: "--once"), i > 0 {
             print("Current: \(fc(w.tempF)), feels \(fc(w.feelsF)) • \(todayDetail(w))")
             print("Next hours:"); for h in w.hourly.prefix(Config.hours) { print("  \(hourFmt.string(from: h.time))  \(fc(h.tempF))  \(symbol(for: h.code, isDay: h.isDay).1)  \(hourDetail(h))") }
             if let p = w.today.nwsDay ?? w.today.nwsNight { print("NWS \(p.name): \(p.detail)") } else { print("NWS: none") }
+            print("Alerts: \(w.alerts.count)"); for a in w.alerts { print("  ⚠️ \(a.event) [\(a.severity)] until \(a.ends.map { alertEndFmt.string(from: $0) } ?? "?") — \(a.summary)") }
             print("Next days:");  for d in w.daily.prefix(Config.days) { print("  \(dayFmt.string(from: d.date))  \(fc(d.hiF)) / \(fc(d.loF))  \(d.nwsDay?.short ?? d.nwsNight?.short ?? symbol(for: d.code, isDay: true).1)\(d.nwsDay != nil && d.nwsNight != nil ? " / night: " + d.nwsNight!.short : "")  \(dayDetail(d))") }
         case .failure(let e): print("ERROR: \(e.localizedDescription)")
         }
@@ -1104,6 +1223,30 @@ for (flag, make) in [("--render-settings", { () -> NSWindow? in let s = Settings
         NSApp.appearance = NSAppearance(named: CommandLine.arguments.contains("--light") ? .aqua : .darkAqua)
         renderWindow(make(), to: CommandLine.arguments[i + 1]); exit(0)
     }
+}
+
+if let i = CommandLine.arguments.firstIndex(of: "--render-bar"), i + 1 < CommandLine.arguments.count {
+    // Headless check of the menu bar look, including the alert dot, on dark and light bars.
+    _ = NSApplication.shared
+    let app = AppDelegate()
+    app.setBar(icon: "cloud.fill", big: "", col1: ("45°F", "7°C"), col2: ("H 55°", "L 38°"))
+    guard let img = app.item.button?.image else { print("no bar image"); exit(1) }
+    let bw = img.size.width + 16, bh: CGFloat = 24
+    let dot = alertDotFrame(button: NSSize(width: bw, height: bh), image: img.size, icon: app.barIconRect, flipped: false)
+    let out = NSImage(size: NSSize(width: bw * 2 + 10, height: bh), flipped: false) { _ in
+        for (k, (bg, fg)) in [(NSColor(white: 0.15, alpha: 1), NSColor.white), (NSColor(white: 0.92, alpha: 1), NSColor.black)].enumerated() {
+            let ox = CGFloat(k) * (bw + 10)
+            bg.setFill(); NSRect(x: ox, y: 0, width: bw, height: bh).fill()
+            let tinted = NSImage(size: img.size, flipped: false) { r in
+                img.draw(in: r); fg.set(); r.fill(using: .sourceAtop); return true }
+            tinted.draw(in: NSRect(x: ox + (bw - img.size.width) / 2, y: (bh - img.size.height) / 2, width: img.size.width, height: img.size.height))
+            NSColor.systemRed.setFill(); NSBezierPath(ovalIn: dot.offsetBy(dx: ox, dy: 0)).fill()
+        }
+        return true
+    }
+    guard let tiff = out.tiffRepresentation, let rep = NSBitmapImageRep(data: tiff),
+          let png = rep.representation(using: .png, properties: [:]) else { exit(1) }
+    try? png.write(to: URL(fileURLWithPath: CommandLine.arguments[i + 1])); print("wrote bar"); exit(0)
 }
 
 if CommandLine.arguments.contains("--apply-update") {
@@ -1158,6 +1301,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     lazy var settings = SettingsWindow()
     lazy var about = AboutWindow()
     var availableUpdate: Release?
+    let alertDot = NSView(frame: .zero)
+    var barIconRect = NSRect.zero
     var updateTimer: Timer?
     var laterUntil: [String: Date] = [:]   // version -> don't re-prompt before this time (after "Later")
     var installing = false
@@ -1358,6 +1503,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         item.button?.image = img
         item.button?.imagePosition = .imageOnly
         item.button?.title = ""
+        barIconRect = NSRect(x: 2, y: (barH - iconSize) / 2, width: iconW, height: iconSize)
+        placeAlertDot()
+    }
+
+    /// A small red dot on the weather icon while an alert is active. It's a separate layer, so the bar
+    /// image stays a template that follows light and dark menu bars.
+    func placeAlertDot() {
+        guard let b = item.button, let img = b.image else { return }
+        if alertDot.superview == nil {
+            alertDot.wantsLayer = true
+            alertDot.layer?.backgroundColor = NSColor.systemRed.cgColor
+            alertDot.layer?.cornerRadius = 3.5
+            b.addSubview(alertDot)
+        }
+        alertDot.frame = alertDotFrame(button: b.bounds.size, image: img.size, icon: barIconRect, flipped: b.isFlipped)
+        alertDot.isHidden = !(last.map { !$0.alerts.isEmpty } ?? false)
     }
 
     /// Re-resolve the place from settings, then fetch. Called at launch and after Save in Settings.
@@ -1402,7 +1563,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             setBar(icon: sym, big: Config.bigTemp ? primaryDeg(w.tempF) : "",
                    col1: (primary(w.tempF), secondary(w.tempF)),
                    col2: ("H \(primaryDeg(w.today.hiF))", "L \(primaryDeg(w.today.loF))"))
-            item.button?.toolTip = "\(place.name): \(desc)"
+            item.button?.toolTip = "\(place.name): \(desc)" + w.alerts.map { "\n⚠️ \($0.event)" }.joined()
+            placeAlertDot()
         case .failure(let e):
             lastError = e.localizedDescription
             if last == nil { setBar(icon: "exclamationmark.triangle", big: "—", col1: ("", ""), col2: ("", "")) }

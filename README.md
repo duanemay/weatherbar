@@ -17,6 +17,10 @@ two-column forecast panel.
   gusts, sunrise and sunset, then the next 7 days with highs, lows, conditions, precipitation chance,
   rain amount, wind and gusts. In the US, the conditions are the National Weather Service's own wording
   for each day and night; hover over a day for the full forecast.
+- **Weather alerts (US):** active National Weather Service warnings, watches and advisories appear in a
+  full-width red band between the current conditions and the forecast, and a red dot appears on the menu
+  bar icon. Each alert shows its name, when it ends, who issued it and what's expected; hover for the full
+  text and instructions.
 - **Both units everywhere.** A Celsius-first setting flips every temperature, including the menu
   bar's high and low.
 - **Location:** uses this Mac's location through Location Services and shows it as "City, ST". If
@@ -30,6 +34,8 @@ two-column forecast panel.
   to install a newer version, then downloads it, verifies it, swaps it in place and relaunches. The
   menu also has **Check for Updates…**.
 - **About window** with version and build date.
+
+![Weather alert](docs/alert.png)
 
 | Settings | About |
 |---|---|
@@ -170,6 +176,8 @@ release job fails if the tag doesn't match the version in `Info.plist`.
   forecaster's full text. Elsewhere, or if NWS doesn't answer within 10 seconds, the cards show Open-Meteo's
   one-word conditions. The temperatures always come from Open-Meteo, so they can differ by a few degrees
   from the numbers inside the NWS text.
+- In the US, active alerts from the same service (`api.weather.gov/alerts/active`), checked at every
+  weather refresh.
 - Icons are Apple SF Symbols, the same family Apple Weather uses.
 - **Why not Apple WeatherKit:** it requires a paid Apple Developer Program membership and an app
   signed with the WeatherKit entitlement. Switching would mean replacing `fetchWeather` with a
