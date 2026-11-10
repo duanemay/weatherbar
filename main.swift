@@ -502,7 +502,7 @@ struct Release {
     let version: String          // "1.5" (tag "v1.5" without the v)
     let zipURL: URL
     let sha256URL: URL?
-    let notes: String
+    var notes: String            // markdown; for an update, every release since the installed version
 }
 
 enum UpdateError: LocalizedError {
@@ -569,8 +569,41 @@ func fetchLatestRelease(completion: @escaping (Result<Release, Error>) -> Void) 
         guard let zip = asset("WeatherBar-\(version).zip") else {
             completion(.failure(UpdateError.badRelease("WeatherBar-\(version).zip"))); return
         }
-        completion(.success(Release(version: version, zipURL: zip, sha256URL: asset("WeatherBar-\(version).zip.sha256"),
-                                    notes: (j["body"] as? String) ?? "")))
+        var rel = Release(version: version, zipURL: zip, sha256URL: asset("WeatherBar-\(version).zip.sha256"),
+                          notes: (j["body"] as? String) ?? "")
+        guard isNewer(version, than: appVersion) else { completion(.success(rel)); return }
+        // Skipping versions? Show what changed in every release since the installed one, not just the latest.
+        fetchNotesSince(appVersion, through: version) { combined in
+            if let combined = combined, !combined.isEmpty { rel.notes = combined }
+            completion(.success(rel))
+        }
+    }.resume()
+}
+
+/// Notes of every published release newer than `installed` and up to `latest`, newest first, joined into one
+/// markdown text with the per-release "What's new:" headings removed. nil when the list can't be read; the
+/// caller then keeps the latest release's own notes.
+func fetchNotesSince(_ installed: String, through latest: String, completion: @escaping (String?) -> Void) {
+    let feed = Config.updateFeedURL
+    guard feed.hasSuffix("/releases/latest"),
+          let url = URL(string: String(feed.dropLast("/latest".count)) + "?per_page=100") else { completion(nil); return }
+    URLSession.shared.dataTask(with: githubRequest(url)) { data, resp, _ in
+        guard (resp as? HTTPURLResponse)?.statusCode == 200, let data = data,
+              let list = try? JSONSerialization.jsonObject(with: data) as? [[String: Any]] else { completion(nil); return }
+        let picked: [(String, String)] = list.compactMap { r in
+            guard (r["draft"] as? Bool) != true, (r["prerelease"] as? Bool) != true,
+                  let tag = r["tag_name"] as? String else { return nil }
+            let v = tag.hasPrefix("v") ? String(tag.dropFirst()) : tag
+            guard isNewer(v, than: installed), !isNewer(v, than: latest) else { return nil }
+            return (v, (r["body"] as? String) ?? "")
+        }
+        .sorted { isNewer($0.0, than: $1.0) }   // newest first
+        let parts = picked.map { _, body in
+            body.components(separatedBy: .newlines)
+                .filter { $0.trimmingCharacters(in: .whitespaces).lowercased() != "what's new:" }
+                .joined(separator: "\n").trimmingCharacters(in: .whitespacesAndNewlines)
+        }.filter { !$0.isEmpty }
+        completion(parts.isEmpty ? nil : parts.joined(separator: "\n"))
     }.resume()
 }
 
@@ -956,6 +989,7 @@ if CommandLine.arguments.contains("--check-update") {
             print("latest:    \(rel.version)   newer than installed: \(isNewer(rel.version, than: appVersion))")
             print("zip:       \(rel.zipURL)")
             print("sha256:    \(rel.sha256URL?.absoluteString ?? "none")")
+            if isNewer(rel.version, than: appVersion) { print("notes shown in the prompt:\n" + plainNotes(rel.notes)) }
         case .failure(let e): print("ERROR: \(e.localizedDescription)")
         }
         sem.signal()
@@ -1083,7 +1117,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let a = NSAlert()
         a.messageText = "WeatherBar \(rel.version) is available"
         let notes = plainNotes(rel.notes)
-        a.informativeText = "You have \(appVersion)." + (notes.isEmpty ? "" : "\n\n" + String(notes.prefix(600)))
+        a.informativeText = "You have \(appVersion). What's changed since then:"
+        if notes.isEmpty {
+            a.informativeText = "You have \(appVersion)."
+        } else {
+            // scrollable, so notes covering several versions never push the buttons off screen
+            let scroll = NSScrollView(frame: NSRect(x: 0, y: 0, width: 420, height: min(260, CGFloat(60 + notes.count / 3))))
+            scroll.hasVerticalScroller = true
+            scroll.borderType = .bezelBorder
+            let text = NSTextView(frame: scroll.bounds)
+            text.string = notes
+            text.isEditable = false
+            text.font = NSFont.systemFont(ofSize: 12)
+            text.textContainerInset = NSSize(width: 6, height: 6)
+            text.autoresizingMask = [.width]
+            scroll.documentView = text
+            a.accessoryView = scroll
+        }
         a.addButton(withTitle: "Install and Relaunch")
         a.addButton(withTitle: "Later")
         a.addButton(withTitle: "Skip This Version")
