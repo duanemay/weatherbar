@@ -165,18 +165,6 @@ release job fails if the tag doesn't match the version in `Info.plist`.
   signed with the WeatherKit entitlement. Switching would mean replacing `fetchWeather` with a
   `WeatherService` call and signing with a developer certificate.
 
-## History
-
-| Version | Date | Change |
-|---|---|---|
-| 1.0 | Oct 26, 2026 | Menu bar icon, °F and °C, today's high and low. |
-| 1.1 | Oct 26, 2026 | Stacked two-column menu bar text, hourly and daily forecast. |
-| 1.2 | Oct 26, 2026 | Card-style dropdown with Current and Today sections. |
-| 1.3 | Oct 26, 2026 | Settings and About windows, Mac location, start at login, app icon. |
-| 1.4 | Oct 26, 2026 | Celsius first, solid cards. |
-| 1.4 | Oct 27, 2026 | Two-column dropdown. Build date without time. |
-| 1.5 | Nov 8, 2026 | Self-update from GitHub Releases. Move-to-Applications prompt, which 1.4 listed but did not include. |
-
 ## License
 
 Copyright 2026 Duane May. Licensed under the [Apache License, Version 2.0](LICENSE).
